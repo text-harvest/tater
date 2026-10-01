@@ -59,7 +59,7 @@ def _get_builtin_examples() -> list[dict]:
     return sorted(examples, key=lambda m: (m.get("order", 999), m.get("name", "")))
 
 
-_GITHUB_REPO = "https://github.com/RENCI/tater"
+_GITHUB_REPO = "https://github.com/text-harvest/tater"
 _GITHUB_EXAMPLES = f"{_GITHUB_REPO}/tree/main/tater/examples"
 
 

@@ -134,6 +134,65 @@ Object.assign(window.dash_clientside.tater, {
         return false;
     },
 
+    /**
+     * Build the static document-select options from doc-list-store — once, at page load.
+     * Each option: {value, label: "<pos>. <name>", pos, search}. Status, flag and the
+     * status/flag filter are NOT baked in: docFilter / docRenderOption read them from
+     * window._taterDocSelect when the dropdown renders, so status and flag changes never
+     * re-send 2,500 options to the Select.
+     */
+    buildDocOptions: function (docListStore) {
+        if (!docListStore || !docListStore.ids) { return window.dash_clientside.no_update; }
+        var ids = docListStore.ids;
+        var options = new Array(ids.length);
+        for (var i = 0; i < ids.length; i++) {
+            var id = ids[i];
+            var name = docListStore.names[i];
+            var info = (docListStore.metadata && docListStore.metadata[id]) || "";
+            options[i] = {
+                value: id,
+                label: (i + 1) + ". " + name,
+                pos: i + 1,
+                search: (name + " " + id + " " + info).toLowerCase(),
+            };
+        }
+        return options;
+    },
+
+    /**
+     * Keep window._taterDocSelect pointing at the current metadata-store and filter for
+     * docFilter / docRenderOption. Holds references only (O(1)); the output is a sink
+     * store and is never written.
+     */
+    updateDocSelectState: function (metadataData, filterData, docListStore) {
+        window._taterDocSelect = {
+            meta: metadataData || {},
+            filter: filterData || {},
+            labels: (docListStore && docListStore.status_labels) || {},
+            colors: (docListStore && docListStore.status_colors) || {},
+        };
+        return window.dash_clientside.no_update;
+    },
+
+    /** Show the current document in document-select (no_update if it already does). */
+    syncDocSelect: function (currentDocId, _data, value) {
+        if (!currentDocId || value === currentDocId) { return window.dash_clientside.no_update; }
+        return currentDocId;
+    },
+
+    /**
+     * Forward a user pick in document-select to doc-select-nav (read by the server-side
+     * navigate_select). Ignores the echo from syncDocSelect. The timestamp makes
+     * re-picking the same document a distinct store value. Blurs the Select so the
+     * arrow-key navigation in keyboard.js works again right away.
+     */
+    docSelectChanged: function (value, currentDocId) {
+        if (!value || value === currentDocId) { return window.dash_clientside.no_update; }
+        var el = document.activeElement;
+        if (el && el.blur) { el.blur(); }
+        return { id: value, t: Date.now() };
+    },
+
 });
 
 
@@ -350,5 +409,124 @@ window.dashMantineFunctions.hlRenderOption = function ({ option, checked }) {
         synonymSuffix,
         !isLeaf ? _chevronDown() : null,
         _checkIcon(checked),
+    );
+};
+
+
+/**
+ * filter / renderOption for the document-select in the footer.
+ *
+ * Status and flag come from window._taterDocSelect (set by updateDocSelectState), not
+ * from the options, so they are current whenever the dropdown renders.
+ *
+ * docFilter: applies the status/flag filter, then search. A purely numeric search ("12"
+ * or "#12") puts the document at that position first; every search also matches as a
+ * case-insensitive substring of the document's name, id and info values (the
+ * precomputed option.search). Respects Mantine's limit.
+ *
+ * docRenderOption: the "<pos>. <name>" label, a red flag icon when flagged, and a
+ * status badge styled like a light xs dmc.Badge.
+ */
+function _docState(id) {
+    const state = window._taterDocSelect || {};
+    const meta = (state.meta && state.meta[id]) || {};
+    const status = meta.status || "not_started";
+    return {
+        status,
+        flagged: !!meta.flagged,
+        label: (state.labels && state.labels[status]) || status,
+        color: (state.colors && state.colors[status]) || "gray",
+    };
+}
+
+window.dashMantineFunctions.docFilter = function ({ options, search, limit }) {
+    const max = limit || Infinity;
+    const q = (search || "").trim().toLowerCase();
+
+    // Empty status list means "all", matching the filter popover's semantics.
+    const filter = (window._taterDocSelect && window._taterDocSelect.filter) || {};
+    const allowed = filter.statuses && filter.statuses.length ? filter.statuses : null;
+    if (filter.flagged || allowed) {
+        options = options.filter((o) => {
+            const s = _docState(o.value);
+            return (!filter.flagged || s.flagged) && (!allowed || allowed.includes(s.status));
+        });
+    }
+    if (!q) return options.slice(0, max);
+
+    const num = /^#?\d+$/.test(q) ? parseInt(q.replace("#", ""), 10) : null;
+    const exact = [];
+    const rest = [];
+    for (const option of options) {
+        if (num !== null && option.pos === num) {
+            exact.push(option);
+        } else if ((option.search || option.label.toLowerCase()).includes(q)) {
+            rest.push(option);
+        }
+    }
+    return exact.concat(rest).slice(0, max);
+};
+
+// tabler:flag (filled) — flagged-document indicator.
+function _flagIcon() {
+    return React.createElement(
+        "svg",
+        {
+            xmlns: "http://www.w3.org/2000/svg",
+            width: 14, height: 14,
+            viewBox: "0 0 24 24",
+            fill: "var(--mantine-color-red-filled)",
+            stroke: "var(--mantine-color-red-filled)",
+            strokeWidth: 2,
+            strokeLinecap: "round",
+            strokeLinejoin: "round",
+            style: { flexShrink: 0 },
+        },
+        React.createElement("path", { d: "M5 5a5 5 0 0 1 7 0a5 5 0 0 0 7 0v9a5 5 0 0 1 -7 0a5 5 0 0 0 -7 0v-9z" }),
+        React.createElement("path", { d: "M5 21v-7" })
+    );
+}
+
+window.dashMantineFunctions.docRenderOption = function ({ option, checked }) {
+    const state = _docState(option.value);
+    const color = state.color;
+    return React.createElement(
+        "span",
+        { style: { display: "flex", alignItems: "center", gap: "6px", flex: 1, minWidth: 0 } },
+        React.createElement(
+            "span",
+            {
+                style: {
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontWeight: checked ? 600 : "normal",
+                },
+            },
+            option.label
+        ),
+        state.flagged ? _flagIcon() : null,
+        React.createElement(
+            "span",
+            {
+                style: {
+                    flexShrink: 0,
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.25px",
+                    lineHeight: "16px",
+                    height: "16px",
+                    padding: "0 6px",
+                    borderRadius: "1000px",
+                    whiteSpace: "nowrap",
+                    background: `var(--mantine-color-${color}-light)`,
+                    color: `var(--mantine-color-${color}-light-color)`,
+                },
+            },
+            state.label
+        ),
     );
 };

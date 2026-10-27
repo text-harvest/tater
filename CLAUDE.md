@@ -68,7 +68,7 @@ CLI flags: `--documents` (required in single mode), `--config` or `--schema` (on
 (also via `TATER_APP_PORT` / `TATER_APP_HOST` / `TATER_APP_DEBUG` env vars).
 
 Notebook examples (`apps/examples/notebooks/`) use `tater.annotate()` with `jupyter_mode="inline"`
-or `"tab"`. Install notebook extras with `pip install -e ".[notebook]"`. Run `nbstripout --install`
+or `"tab"`. Install notebook extras with `uv sync --extra notebook`. Run `uv run nbstripout --install`
 once per clone to keep notebooks clean in git (`.gitattributes` configures the filter; it strips
 outputs, execution counts, and kernel metadata on `git add`).
 
@@ -99,10 +99,24 @@ outputs, execution counts, and kernel metadata on `git add`).
   Format: `{doc_id: {annotations: {...}, metadata: {...}}}`.
 - **value_helpers**: `get_model_value` / `set_model_value` in `tater/ui/value_helpers.py`
   handle dot-path reads/writes into nested Pydantic model instances.
-- **Flag/notes loading**: `load_flag_and_notes` in `callbacks.py` fires on `current-doc-id`
+- **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `current-doc-id`
   change and populates both `flag-document` (checked) and `document-notes` (value) from
-  `tater_app.metadata`. This is the only callback that writes to these outputs on navigation —
-  the corresponding `save_flag` / `save_notes` callbacks only write on user interaction.
+  `metadata-store`. This is the only callback that writes to these outputs on navigation,
+  and it returns `no_update` for a control that already shows the right value. Setting a
+  control re-fires `save_flag` / `save_notes`, so those also return `no_update` when the value
+  equals what is already stored — otherwise every navigation would write `metadata-store`
+  and trigger an auto-save.
+- **Document selector**: the footer `document-select` (`dmc.Select`) is fully clientside.
+  `buildDocOptions` builds its static options (label, position, search text) from
+  `doc-list-store` once at page load. Status, flag and the status/flag filter are *not* in the
+  options: `updateDocSelectState` keeps `window._taterDocSelect` pointing at `metadata-store` /
+  `filter-store` (its output, `doc-select-state-sink`, is never written), and `docFilter` /
+  `docRenderOption` (in `assets/utils.js`) read it when the dropdown renders to filter, draw
+  the status badge/flag, and search (exact position first, then name/id/info substring). A
+  user pick goes through `docSelectChanged` → `doc-select-nav` store → server `navigate_select`.
+  Don't make the option list depend on metadata again — re-sending 2,500 options to the Select
+  cost ~120 ms per Next — and don't reintroduce per-document components with pattern-matching
+  IDs: at ~2,500 docs they froze the UI for seconds per action (#107).
 
 ## Hosted mode
 
@@ -226,8 +240,9 @@ if not ctx.triggered or not ctx.triggered[0].get("value"):
 output must also use `allow_duplicate=True`. Missing it on one will cause Dash to raise a
 `DuplicateCallback` error at startup. Outputs in this codebase that use `allow_duplicate=True`:
 
-- **`current-doc-id` / `data`** — written by the prev/next buttons and the document-menu
-  selector. All three already use `allow_duplicate=True`; any new navigation callback must too.
+- **`current-doc-id` / `data`** — written by the prev/next buttons, the document selector
+  (`navigate_select`), auto-advance and "go to first incomplete". All but the first registered
+  use `allow_duplicate=True`; any new navigation callback must too.
   See the comment block on the first such callback in `core.py`.
 
 - **`annotations-store` / `data`** — written by `captureValue`/`captureChecked` (clientside,
@@ -370,12 +385,15 @@ the JS filter.
 
 ## Tests
 
-Tests live in `tests/`. Run with:
+Tests live in `tests/`. The project is managed with uv (`uv.lock`); `uv run` syncs `.venv`
+from the lockfile, including the `dev` dependency group (`dash[testing]`, which brings pytest
+and pins selenium `<=4.2.0`), before running. Don't `pip install` into `.venv` — the next sync
+reverts it; change dependencies with `uv add` / `uv add --dev`. Run with:
 
 ```bash
-python -m pytest tests/ --ignore=tests/test_browser.py   # fast, no browser
-python -m pytest tests/test_browser.py --headless         # browser tests
-python -m pytest tests/ --headless                        # full suite
+uv run pytest tests/ --ignore=tests/test_browser.py   # fast, no browser
+uv run pytest tests/test_browser.py --headless         # browser tests
+uv run pytest tests/ --headless                        # full suite
 ```
 
 **Test files:**
@@ -388,7 +406,7 @@ python -m pytest tests/ --headless                        # full suite
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
-- `test_browser.py` — `dash.testing` browser tests: navigation, flag, notes
+- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore, and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
 
 **Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` auto-installs a matching ChromeDriver via `webdriver-manager` on first run.
 

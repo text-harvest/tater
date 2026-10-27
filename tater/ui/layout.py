@@ -21,15 +21,19 @@ _FOOTER_HEIGHT = 84
 
 
 def _build_doc_list_store_data(tater_app: TaterApp) -> dict:
-    """Precompute per-doc display info for the clientside nav-info callback."""
+    """Precompute per-doc display info for the clientside nav-info and document-select callbacks."""
     docs = tater_app.documents
     return {
         "total": len(docs),
+        "ids": [d.id for d in docs],
+        "names": [d.display_name() for d in docs],
         "index": {d.id: i for i, d in enumerate(docs)},
         "metadata": {
             d.id: " | ".join(f"{k}: {v}" for k, v in d.info.items()) if d.info else ""
             for d in docs
         },
+        "status_labels": STATUS_LABELS,
+        "status_colors": STATUS_COLORS,
         "hosted": tater_app.is_hosted,
     }
 
@@ -165,6 +169,8 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
             }),
             dcc.Interval(id="clock-interval", interval=1000, n_intervals=0),
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
+            dcc.Store(id="doc-select-nav", data=None),
+            dcc.Store(id="doc-select-state-sink", data=None),  # dummy output of updateDocSelectState
             doc_list_store,
             *span_stores,
             app_shell,
@@ -393,21 +399,25 @@ def _build_app_footer(is_hosted: bool = False) -> dmc.AppShellFooter:
                         ),
                         # Selector + flag (grows)
                         dmc.Group([
-                            dmc.Menu([
-                                dmc.MenuTarget(
-                                    dmc.Button(
-                                        "Select document",
-                                        id="document-selector-button",
-                                        variant="outline",
-                                        size="sm",
-                                        fullWidth=True,
-                                        rightSection=DashIconify(icon="tabler:selector", width=16),
-                                        style={"borderRight": "none", "borderRadius": "var(--mantine-radius-sm) 0 0 var(--mantine-radius-sm)"},
-                                    ),
-                                    boxWrapperProps={"className": "menu-target-wrapper", "style": {"flex": "1", "minWidth": 0}},
-                                ),
-                                dmc.MenuDropdown(id="document-menu-dropdown", children=[]),
-                            ], position="top-start", withArrow=True, withinPortal=True, width="target", zIndex=600),
+                            # Options, status/flag rendering and search are all clientside
+                            # (buildDocOptions / updateDocSelectState / docRenderOption / docFilter in utils.js).
+                            dmc.Select(
+                                id="document-select",
+                                data=[],
+                                value=None,
+                                placeholder="Select document",
+                                searchable=True,
+                                allowDeselect=False,
+                                nothingFoundMessage="No matching documents",
+                                renderOption={"function": "docRenderOption"},
+                                filter={"function": "docFilter"},
+                                maxDropdownHeight=400,
+                                size="sm",
+                                rightSection=DashIconify(icon="tabler:selector", width=16),
+                                comboboxProps={"position": "top-start", "withinPortal": True, "zIndex": 600},
+                                style={"flex": "1", "minWidth": 0},
+                                styles={"input": {"borderTopRightRadius": 0, "borderBottomRightRadius": 0}},
+                            ),
                             dmc.Popover(
                                 [
                                     dmc.PopoverTarget(

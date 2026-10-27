@@ -135,58 +135,43 @@ Object.assign(window.dash_clientside.tater, {
     },
 
     /**
-     * Build the document-select options from doc-list-store + metadata-store, applying
-     * the status/flag filter. Returns no_update unless something the options show
-     * (a status, a flag, or the filter) changed, so annotation edits that don't change
-     * status never re-render the Select.
-     *
-     * Each option: {value, label: "<pos>. <name>", pos, status, statusLabel,
-     * statusColor, flagged, search} — the extra fields are read by docRenderOption
-     * and docFilter.
+     * Build the static document-select options from doc-list-store — once, at page load.
+     * Each option: {value, label: "<pos>. <name>", pos, search}. Status, flag and the
+     * status/flag filter are NOT baked in: docFilter / docRenderOption read them from
+     * window._taterDocSelect when the dropdown renders, so status and flag changes never
+     * re-send 2,500 options to the Select.
      */
-    buildDocOptions: function (metadataData, filterData, docListStore) {
-        var nu = window.dash_clientside.no_update;
-        if (!docListStore || !docListStore.ids) { return nu; }
+    buildDocOptions: function (docListStore) {
+        if (!docListStore || !docListStore.ids) { return window.dash_clientside.no_update; }
         var ids = docListStore.ids;
-        var filter = filterData || {};
-
-        var statuses = new Array(ids.length);
-        var flags = new Array(ids.length);
-        var sigParts = new Array(ids.length);
+        var options = new Array(ids.length);
         for (var i = 0; i < ids.length; i++) {
-            var meta = metadataData && metadataData[ids[i]];
-            statuses[i] = (meta && meta.status) || "not_started";
-            flags[i] = !!(meta && meta.flagged);
-            sigParts[i] = statuses[i] + (flags[i] ? "!" : "");
-        }
-        var sig = JSON.stringify(filter) + "|" + sigParts.join(",");
-        var cache = window._taterDocOptionsCache;
-        if (cache && cache.store === docListStore && cache.sig === sig) { return nu; }
-        window._taterDocOptionsCache = { store: docListStore, sig: sig };
-
-        // Empty status list means "all", matching the filter popover's semantics.
-        var allowed = (filter.statuses && filter.statuses.length) ? filter.statuses : null;
-        var labels = docListStore.status_labels || {};
-        var colors = docListStore.status_colors || {};
-        var options = [];
-        for (var j = 0; j < ids.length; j++) {
-            if (filter.flagged && !flags[j]) { continue; }
-            if (allowed && allowed.indexOf(statuses[j]) === -1) { continue; }
-            var id = ids[j];
-            var name = docListStore.names[j];
+            var id = ids[i];
+            var name = docListStore.names[i];
             var info = (docListStore.metadata && docListStore.metadata[id]) || "";
-            options.push({
+            options[i] = {
                 value: id,
-                label: (j + 1) + ". " + name,
-                pos: j + 1,
-                status: statuses[j],
-                statusLabel: labels[statuses[j]] || statuses[j],
-                statusColor: colors[statuses[j]] || "gray",
-                flagged: flags[j],
+                label: (i + 1) + ". " + name,
+                pos: i + 1,
                 search: (name + " " + id + " " + info).toLowerCase(),
-            });
+            };
         }
         return options;
+    },
+
+    /**
+     * Keep window._taterDocSelect pointing at the current metadata-store and filter for
+     * docFilter / docRenderOption. Holds references only (O(1)); the output is a sink
+     * store and is never written.
+     */
+    updateDocSelectState: function (metadataData, filterData, docListStore) {
+        window._taterDocSelect = {
+            meta: metadataData || {},
+            filter: filterData || {},
+            labels: (docListStore && docListStore.status_labels) || {},
+            colors: (docListStore && docListStore.status_colors) || {},
+        };
+        return window.dash_clientside.no_update;
     },
 
     /** Show the current document in document-select (no_update if it already does). */
@@ -431,16 +416,42 @@ window.dashMantineFunctions.hlRenderOption = function ({ option, checked }) {
 /**
  * filter / renderOption for the document-select in the footer.
  *
- * docFilter: a purely numeric search ("12" or "#12") puts the document at that position
- * first; every search also matches as a case-insensitive substring of the document's
- * name, id and info values (the precomputed option.search). Respects Mantine's limit.
+ * Status and flag come from window._taterDocSelect (set by updateDocSelectState), not
+ * from the options, so they are current whenever the dropdown renders.
+ *
+ * docFilter: applies the status/flag filter, then search. A purely numeric search ("12"
+ * or "#12") puts the document at that position first; every search also matches as a
+ * case-insensitive substring of the document's name, id and info values (the
+ * precomputed option.search). Respects Mantine's limit.
  *
  * docRenderOption: the "<pos>. <name>" label, a red flag icon when flagged, and a
  * status badge styled like a light xs dmc.Badge.
  */
+function _docState(id) {
+    const state = window._taterDocSelect || {};
+    const meta = (state.meta && state.meta[id]) || {};
+    const status = meta.status || "not_started";
+    return {
+        status,
+        flagged: !!meta.flagged,
+        label: (state.labels && state.labels[status]) || status,
+        color: (state.colors && state.colors[status]) || "gray",
+    };
+}
+
 window.dashMantineFunctions.docFilter = function ({ options, search, limit }) {
     const max = limit || Infinity;
     const q = (search || "").trim().toLowerCase();
+
+    // Empty status list means "all", matching the filter popover's semantics.
+    const filter = (window._taterDocSelect && window._taterDocSelect.filter) || {};
+    const allowed = filter.statuses && filter.statuses.length ? filter.statuses : null;
+    if (filter.flagged || allowed) {
+        options = options.filter((o) => {
+            const s = _docState(o.value);
+            return (!filter.flagged || s.flagged) && (!allowed || allowed.includes(s.status));
+        });
+    }
     if (!q) return options.slice(0, max);
 
     const num = /^#?\d+$/.test(q) ? parseInt(q.replace("#", ""), 10) : null;
@@ -477,7 +488,8 @@ function _flagIcon() {
 }
 
 window.dashMantineFunctions.docRenderOption = function ({ option, checked }) {
-    const color = option.statusColor || "gray";
+    const state = _docState(option.value);
+    const color = state.color;
     return React.createElement(
         "span",
         { style: { display: "flex", alignItems: "center", gap: "6px", flex: 1, minWidth: 0 } },
@@ -495,7 +507,7 @@ window.dashMantineFunctions.docRenderOption = function ({ option, checked }) {
             },
             option.label
         ),
-        option.flagged ? _flagIcon() : null,
+        state.flagged ? _flagIcon() : null,
         React.createElement(
             "span",
             {
@@ -514,7 +526,7 @@ window.dashMantineFunctions.docRenderOption = function ({ option, checked }) {
                     color: `var(--mantine-color-${color}-light-color)`,
                 },
             },
-            option.statusLabel || option.status
+            state.label
         ),
     );
 };

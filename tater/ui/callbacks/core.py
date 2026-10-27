@@ -136,19 +136,24 @@ def setup_callbacks(tater_app: TaterApp) -> None:
 
         return _perform_navigation(ta, current_doc_id, current_index, timing_data, annotations_data, metadata_data)
 
-    # Document selector. The option list is built clientside from doc-list-store,
-    # metadata-store and filter-store, and only re-sent to the Select when a status,
-    # flag or the filter actually changes — the server is not involved.
+    # Document selector. The static option list is built clientside once, at page
+    # load. Status, flag and the status/flag filter are read by docFilter /
+    # docRenderOption from a browser-side reference to metadata-store / filter-store
+    # when the dropdown renders, so status and flag changes never re-send the options.
     app.clientside_callback(
         ClientsideFunction(namespace="tater", function_name="buildDocOptions"),
         Output("document-select", "data"),
+        Input("doc-list-store", "data"),
+    )
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="updateDocSelectState"),
+        Output("doc-select-state-sink", "data"),
         Input("metadata-store", "data"),
         Input("filter-store", "data"),
         State("doc-list-store", "data"),
     )
 
-    # Keep the selector showing the current document (also restores it if the
-    # Select cleared its value because the filter hid the current document).
+    # Keep the selector showing the current document.
     app.clientside_callback(
         ClientsideFunction(namespace="tater", function_name="syncDocSelect"),
         Output("document-select", "value"),

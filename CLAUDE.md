@@ -106,13 +106,17 @@ outputs, execution counts, and kernel metadata on `git add`).
   control re-fires `save_flag` / `save_notes`, so those also return `no_update` when the value
   equals what is already stored — otherwise every navigation would write `metadata-store`
   and trigger an auto-save.
-- **Document selector**: the footer `document-select` (`dmc.Select`) is fully clientside —
-  `buildDocOptions` builds its options from `doc-list-store` + `metadata-store` + `filter-store`
-  and returns `no_update` unless a status, flag or the filter changed; `docRenderOption` /
-  `docFilter` (in `assets/utils.js`) draw the status badge/flag and handle search (exact
-  position first, then name/id/info substring). A user pick goes through `docSelectChanged` →
-  `doc-select-nav` store → server `navigate_select`. Don't reintroduce per-document components
-  with pattern-matching IDs here: at ~2,500 docs they froze the UI for seconds per action (#107).
+- **Document selector**: the footer `document-select` (`dmc.Select`) is fully clientside.
+  `buildDocOptions` builds its static options (label, position, search text) from
+  `doc-list-store` once at page load. Status, flag and the status/flag filter are *not* in the
+  options: `updateDocSelectState` keeps `window._taterDocSelect` pointing at `metadata-store` /
+  `filter-store` (its output, `doc-select-state-sink`, is never written), and `docFilter` /
+  `docRenderOption` (in `assets/utils.js`) read it when the dropdown renders to filter, draw
+  the status badge/flag, and search (exact position first, then name/id/info substring). A
+  user pick goes through `docSelectChanged` → `doc-select-nav` store → server `navigate_select`.
+  Don't make the option list depend on metadata again — re-sending 2,500 options to the Select
+  cost ~120 ms per Next — and don't reintroduce per-document components with pattern-matching
+  IDs: at ~2,500 docs they froze the UI for seconds per action (#107).
 
 ## Hosted mode
 

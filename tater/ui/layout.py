@@ -170,6 +170,7 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
             dcc.Interval(id="clock-interval", interval=1000, n_intervals=0),
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
             dcc.Store(id="doc-select-nav", data=None),
+            dcc.Store(id="doc-select-state-sink", data=None),  # dummy output of updateDocSelectState
             doc_list_store,
             *span_stores,
             app_shell,
@@ -399,7 +400,7 @@ def _build_app_footer(is_hosted: bool = False) -> dmc.AppShellFooter:
                         # Selector + flag (grows)
                         dmc.Group([
                             # Options, status/flag rendering and search are all clientside
-                            # (buildDocOptions / docRenderOption / docFilter in utils.js).
+                            # (buildDocOptions / updateDocSelectState / docRenderOption / docFilter in utils.js).
                             dmc.Select(
                                 id="document-select",
                                 data=[],

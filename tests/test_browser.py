@@ -9,13 +9,14 @@ Run with:
 import json
 import time
 from pathlib import Path
-from typing import Optional, Literal
+from typing import List, Optional, Literal
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from selenium.webdriver.common.keys import Keys
 
 from tater.ui.tater_app import TaterApp
-from tater.widgets import RadioGroupWidget
+from tater.widgets import CheckboxGroupWidget, RadioGroupWidget
 
 
 def js_click(dash_duo, selector):
@@ -170,6 +171,168 @@ class TestNavigation:
 
 
 # ---------------------------------------------------------------------------
+# Document selector
+# ---------------------------------------------------------------------------
+
+def search_document_select(dash_duo, text):
+    """Open the document selector, replace its search text, and return the visible option texts."""
+    select = dash_duo.find_element("#document-select")
+    select.click()
+    select.send_keys(Keys.CONTROL, "a")
+    select.send_keys(Keys.BACKSPACE)
+    if text:
+        select.send_keys(text)
+    time.sleep(0.3)
+    return [el.text for el in dash_duo.driver.find_elements("css selector", ".mantine-Select-option")]
+
+
+def select_input_value(dash_duo, expected, timeout=4.0):
+    """Wait for the document selector's input to show `expected`; return what it shows."""
+    until = time.time() + timeout
+    value = None
+    while time.time() < until:
+        value = dash_duo.find_element("#document-select").get_attribute("value")
+        if value == expected:
+            break
+        time.sleep(0.1)
+    return value
+
+
+class TestDocumentSelect:
+    def test_shows_current_document(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        assert select_input_value(dash_duo, "1. Doc One") == "1. Doc One"
+
+        js_click(dash_duo, "#btn-next")
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        assert select_input_value(dash_duo, "2. Doc Two") == "2. Doc Two"
+
+    def test_lists_all_documents_with_status(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        options = search_document_select(dash_duo, "")
+        assert len(options) == 3
+        assert options[0].startswith("1. Doc One")
+        assert "IN PROGRESS" in options[0].upper()
+        assert "NOT STARTED" in options[1].upper()
+
+    def test_selecting_option_navigates(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        search_document_select(dash_duo, "3")
+        option = dash_duo.driver.find_elements("css selector", ".mantine-Select-option")[0]
+        assert option.text.startswith("3. Doc Three")
+        option.click()
+        dash_duo.wait_for_text_to_equal("#document-title", "3 / 3")
+        assert "Third document text" in dash_duo.find_element("#document-content").text
+
+    def test_search_by_name(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        options = search_document_select(dash_duo, "two")
+        assert len(options) == 1
+        assert options[0].startswith("2. Doc Two")
+
+    def test_search_by_id(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        options = search_document_select(dash_duo, "doc3")
+        assert len(options) == 1
+        assert options[0].startswith("3. Doc Three")
+
+    def test_flagged_filter(self, dash_duo, tater):
+        dash_duo.start_server(tater.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        js_click(dash_duo, "#flag-document")
+        time.sleep(0.3)
+        js_click(dash_duo, "#filter-flagged-check")
+        time.sleep(0.3)
+        options = search_document_select(dash_duo, "")
+        assert len(options) == 1
+        assert options[0].startswith("1. Doc One")
+
+
+# ---------------------------------------------------------------------------
+# Large document sets (#107)
+# ---------------------------------------------------------------------------
+
+class LabelsSchema(BaseModel):
+    labels: List[Literal["a", "b", "c", "d", "e", "f", "g"]] = Field(default_factory=list)
+
+
+@pytest.fixture
+def tater_large(tmp_path):
+    """2,500 short documents — the scale at which the old document menu froze the UI."""
+    docs = [{"id": f"doc_{i:05d}", "text": f"Synthetic sentence number {i}."} for i in range(2500)]
+    docs_path = tmp_path / "docs_2500.json"
+    docs_path.write_text(json.dumps(docs))
+    app = TaterApp(title="Large", schema_model=LabelsSchema, annotations_path=str(tmp_path / "ann_2500.json"))
+    app.load_documents(str(docs_path))
+    app.set_annotation_widgets([CheckboxGroupWidget("labels", label="Labels", vertical=True)])
+    return app
+
+
+_COUNT_CALLBACK_REQUESTS = """
+window.__taterReqs = [];
+const origFetch = window.fetch;
+window.fetch = function (url) {
+    if (String(url).includes('_dash-update-component')) { window.__taterReqs.push(Date.now()); }
+    return origFetch.apply(this, arguments);
+};
+"""
+
+
+def _wait_for_quiet(dash_duo, quiet=1.0, timeout=20.0):
+    """Wait until no callback request has been sent for `quiet` seconds; return the request timestamps."""
+    start = time.time()
+    while time.time() - start < timeout:
+        reqs = dash_duo.driver.execute_script("return window.__taterReqs")
+        last = reqs[-1] / 1000 if reqs else start
+        if time.time() - last >= quiet:
+            return reqs
+        time.sleep(0.1)
+    return dash_duo.driver.execute_script("return window.__taterReqs")
+
+
+class TestLargeDocumentSet:
+    """Each action should cost a handful of callback requests, independent of N.
+
+    Before #107 a Next click at this size sent ~20 requests over ~11 s, and the
+    document menu was rebuilt several times per action.
+    """
+
+    def test_next_click_settles_quickly(self, dash_duo, tater_large):
+        dash_duo.start_server(tater_large.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 2500", timeout=20)
+        dash_duo.driver.execute_script(_COUNT_CALLBACK_REQUESTS)
+        _wait_for_quiet(dash_duo)
+        dash_duo.driver.execute_script("window.__taterReqs = []")
+
+        clicked = time.time()
+        js_click(dash_duo, "#btn-next")
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 2500")
+        reqs = _wait_for_quiet(dash_duo)
+
+        assert len(reqs) <= 10, f"{len(reqs)} callback requests for one Next click"
+        assert reqs and reqs[-1] / 1000 - clicked < 2.0, "callback cascade took too long"
+
+    def test_checkbox_tick_settles_quickly(self, dash_duo, tater_large):
+        dash_duo.start_server(tater_large.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 2500", timeout=20)
+        dash_duo.driver.execute_script(_COUNT_CALLBACK_REQUESTS)
+        _wait_for_quiet(dash_duo)
+        dash_duo.driver.execute_script("window.__taterReqs = []")
+
+        clicked = time.time()
+        js_click(dash_duo, "input[type='checkbox'][value='a']")
+        reqs = _wait_for_quiet(dash_duo)
+
+        assert len(reqs) <= 6, f"{len(reqs)} callback requests for one checkbox tick"
+        assert reqs and reqs[-1] / 1000 - clicked < 2.0, "callback cascade took too long"
+
+
+# ---------------------------------------------------------------------------
 # Flag and notes
 # ---------------------------------------------------------------------------
 
@@ -276,8 +439,9 @@ class TestAnnotationPersistence:
         # loadValues restores the annotation clientside — wait for the checked input
         dash_duo.wait_for_element("input[type='radio'][value='positive']:checked")
 
-    def test_status_badge_goes_complete_on_required_field_fill(self, dash_duo, tater_required):
-        """Status badge reaches Complete once all required fields are filled."""
+    def test_status_goes_complete_on_departure_with_required_field_filled(self, dash_duo, tater_required):
+        """Filling the required fields keeps the current doc In Progress; it becomes
+        Complete when the user navigates away (completion is assigned on departure)."""
         dash_duo.start_server(tater_required.app)
         dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
         # Wait for on_doc_change (server callback) to settle — it writes visited=True to
@@ -289,7 +453,14 @@ class TestAnnotationPersistence:
             "arguments[0].click();",
             dash_duo.find_element("input[type='radio'][value='positive']"),
         )
-        dash_duo.wait_for_text_to_equal("#status-badge", "COMPLETE")
+        dash_duo.wait_for_text_to_equal("#status-badge", "IN PROGRESS")
+
+        js_click(dash_duo, "#btn-next")
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        time.sleep(0.3)
+        options = search_document_select(dash_duo, "")
+        assert options[0].startswith("1. Doc One")
+        assert "COMPLETE" in options[0].upper()
 
     def test_annotation_persists_to_file(self, dash_duo, tater_required):
         """Annotation written by captureValue reaches disk via auto_save."""

@@ -8,10 +8,10 @@ import pytest
 
 from tater.ui.callbacks.helpers import (
     _build_ev_lookup,
-    _build_menu_items,
     _collect_all_control_templates,
     _collect_value_capture_widgets,
     _default_meta,
+    _doc_index,
     _get_ann,
     _get_meta,
     _perform_navigation,
@@ -401,58 +401,28 @@ class TestPerformNavigation:
 
 
 # ---------------------------------------------------------------------------
-# _build_menu_items
+# _doc_index
 # ---------------------------------------------------------------------------
 
-class TestBuildMenuItems:
-    def _metadata(self, doc_ids, flagged=(), statuses=None):
-        data = {}
-        for i, doc_id in enumerate(doc_ids):
-            status = (statuses or {}).get(doc_id, "not_started")
-            data[doc_id] = {
-                "flagged": doc_id in flagged,
-                "notes": "",
-                "visited": status != "not_started",
-                "annotation_seconds": 0.0,
-                "status": status,
-            }
-        return data
+class TestDocIndex:
+    def test_returns_position(self):
+        ta = _make_ta([_doc("doc1"), _doc("doc2"), _doc("doc3")])
+        assert _doc_index(ta, "doc1") == 0
+        assert _doc_index(ta, "doc3") == 2
 
-    def test_returns_one_item_per_document(self):
-        docs = [_doc("doc1"), _doc("doc2"), _doc("doc3")]
-        ta = _make_ta(docs)
-        items = _build_menu_items(ta, self._metadata(["doc1", "doc2", "doc3"]))
-        assert len(items) == 3
+    def test_unknown_id_returns_none(self):
+        ta = _make_ta([_doc("doc1")])
+        assert _doc_index(ta, "nope") is None
 
-    def test_empty_document_list(self):
-        ta = _make_ta([])
-        items = _build_menu_items(ta, {})
-        assert len(items) == 1  # placeholder "No documents match filter"
+    def test_empty_id_returns_none(self):
+        ta = _make_ta([_doc("doc1")])
+        assert _doc_index(ta, None) is None
+        assert _doc_index(ta, "") is None
 
-    def test_flagged_only_returns_only_flagged(self):
-        docs = [_doc("doc1"), _doc("doc2"), _doc("doc3")]
-        ta = _make_ta(docs)
-        meta = self._metadata(["doc1", "doc2", "doc3"], flagged=["doc2"])
-        items = _build_menu_items(ta, meta, filter_data={"flagged": True, "statuses": ["not_started", "in_progress", "complete"]})
-        assert len(items) == 1
-
-    def test_flagged_only_with_no_flagged_returns_placeholder(self):
-        docs = [_doc("doc1"), _doc("doc2")]
-        ta = _make_ta(docs)
-        meta = self._metadata(["doc1", "doc2"])
-        items = _build_menu_items(ta, meta, filter_data={"flagged": True, "statuses": ["not_started", "in_progress", "complete"]})
-        assert len(items) == 1
-        # The placeholder is a dmc.Text, not a dmc.MenuItem
-
-    def test_none_metadata_uses_defaults(self):
-        docs = [_doc("doc1")]
-        ta = _make_ta(docs)
-        items = _build_menu_items(ta, None)
-        assert len(items) == 1
-
-    def test_all_flagged_all_returned(self):
-        docs = [_doc("doc1"), _doc("doc2")]
-        ta = _make_ta(docs)
-        meta = self._metadata(["doc1", "doc2"], flagged=["doc1", "doc2"])
-        items = _build_menu_items(ta, meta, filter_data={"flagged": True, "statuses": ["not_started", "in_progress", "complete"]})
-        assert len(items) == 2
+    def test_rebuilds_when_documents_replaced(self):
+        ta = _make_ta([_doc("doc1"), _doc("doc2")])
+        assert _doc_index(ta, "doc2") == 1
+        ta.documents = [_doc("doc2"), _doc("doc9")]
+        assert _doc_index(ta, "doc2") == 0
+        assert _doc_index(ta, "doc9") == 1
+        assert _doc_index(ta, "doc1") is None

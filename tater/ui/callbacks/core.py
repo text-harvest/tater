@@ -770,13 +770,7 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call=True,
     )
     def update_status_from_annotations(annotations_data, doc_id, metadata_data):
-        if not doc_id:
-            return no_update, no_update
-        ta = _ta()
-        metadata_data = dict(metadata_data or {})
-        update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
-        status = metadata_data.get(doc_id, {}).get("status", "not_started")
-        return status, metadata_data
+        return _update_status_from_annotations_impl(_ta(), annotations_data, doc_id, metadata_data)
 
     # --- Clientside load: value prop --- push annotation values to widgets on doc change
     # or repeater delete.  ev-lookup-store supplies per-field empty values so the server
@@ -802,6 +796,26 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call="initial_duplicate",
     )
 
+
+
+def _update_status_from_annotations_impl(ta, annotations_data, doc_id, metadata_data):
+    """Business logic for update_status_from_annotations callback.
+
+    Returns (status, metadata_data), or (no_update, no_update) when there is no
+    current document or the status is unchanged — the common case for an edit, since
+    an edit never changes the in-flight status. Skipping the metadata-store write
+    avoids an extra full-store auto_save per edit.
+    """
+    if not doc_id:
+        return no_update, no_update
+    old_status = _get_meta(metadata_data, doc_id).get("status", "not_started")
+    metadata_data = dict(metadata_data or {})
+    metadata_data[doc_id] = dict(_get_meta(metadata_data, doc_id))
+    update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
+    status = metadata_data[doc_id].get("status", "not_started")
+    if status == old_status:
+        return no_update, no_update
+    return status, metadata_data
 
 
 def _decode_field_path(ld: str, path: str, tf: str) -> str:

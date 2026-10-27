@@ -23,6 +23,7 @@ from tater.ui.callbacks.core import (
     _save_flag_impl,
     _save_notes_impl,
     _toggle_pause_impl,
+    _update_status_from_annotations_impl,
     _update_save_status_impl,
 )
 
@@ -413,3 +414,32 @@ class TestSaveNotes:
 
     def test_no_doc_is_noop(self):
         assert _save_notes_impl("hello", None, {}) is no_update
+
+
+# ---------------------------------------------------------------------------
+# _update_status_from_annotations_impl
+# ---------------------------------------------------------------------------
+
+class TestUpdateStatusFromAnnotations:
+    def test_unchanged_status_is_noop(self):
+        # An edit on a visited doc keeps it in_progress; writing metadata-store anyway
+        # would trigger a second full-store auto_save per edit.
+        meta = {"doc1": {"visited": True, "status": "in_progress"}}
+        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta) == (no_update, no_update)
+
+    def test_unvisited_not_started_is_noop(self):
+        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", {}) == (no_update, no_update)
+
+    def test_changed_status_is_written(self):
+        meta = {"doc1": {"visited": True, "status": "not_started"}}
+        status, metadata = _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
+        assert status == "in_progress"
+        assert metadata["doc1"]["status"] == "in_progress"
+
+    def test_does_not_mutate_input(self):
+        meta = {"doc1": {"visited": True, "status": "not_started"}}
+        _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
+        assert meta["doc1"]["status"] == "not_started"
+
+    def test_no_doc_is_noop(self):
+        assert _update_status_from_annotations_impl(_make_ta(), {}, None, {}) == (no_update, no_update)

@@ -207,6 +207,7 @@ Widgets that use this pattern each include a relay store in their rendered outpu
 - Repeater: `{"type": "repeater-ann-relay", "field": pipe_field}`
 - Nested repeater: `{"type": "nested-repeater-ann-relay", "ld": ld, "li": li}`
 - HierarchicalLabelSelect: `{"type": "hl-select-relay", "field": pipe_field}`
+- HierarchicalLabelMulti: `{"type": "hl-multi-relay", "field": pipe_field}`
 - Span: span-trigger store data carries `{"count": N, "annotations_update": {...}}`
 
 ## DMC version constraints
@@ -246,7 +247,7 @@ output must also use `allow_duplicate=True`. Missing it on one will cause Dash t
   See the comment block on the first such callback in `core.py`.
 
 - **`annotations-store` / `data`** — written by `captureValue`/`captureChecked` (clientside,
-  ALL pattern) and by multiple relay callbacks (repeater, nested repeater, HL, HL tags, span).
+  ALL pattern) and by multiple relay callbacks (repeater, nested repeater, HL select, HL multi, span).
   All use `allow_duplicate=True`. New callbacks writing to `annotations-store` must also use it.
 
 - **`upload-location` / `href`** — written by both `handle_submit` (upload tab) and

@@ -405,7 +405,7 @@ Object.assign(window.dash_clientside.tater, {
     },
 
     // ---- applyFieldOp: apply a {field, value} descriptor to annotations-store ----
-    // Used by HL relay callbacks (hier-ann-relay, hl-tags-ann-relay).
+    // Used by HL relay callbacks (hl-select-relay, hl-multi-relay).
     applyFieldOp: function(_allRelays, docId, annotationsData) {
         var nu = window.dash_clientside.no_update;
         var ctx = window.dash_clientside.callback_context;

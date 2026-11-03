@@ -14,7 +14,7 @@ import dash_mantine_components as dmc
 from tater.ui.callbacks.helpers import (
     _get_ann,
     _get_meta,
-    _build_menu_items,
+    _doc_index,
     _perform_navigation,
     update_status_for_doc,
     _status_display,
@@ -92,9 +92,10 @@ def setup_callbacks(tater_app: TaterApp) -> None:
             return no_update
 
         ta = _ta()
-        doc = next((d for d in ta.documents if d.id == doc_id), None)
-        if not doc:
+        idx = _doc_index(ta, doc_id)
+        if idx is None:
             return no_update
+        doc = ta.documents[idx]
 
         try:
             return doc.load_content()
@@ -124,7 +125,7 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         if not ctx.triggered or not ta.documents:
             return no_update, no_update, no_update, no_update
 
-        current_index = next((i for i, d in enumerate(ta.documents) if d.id == current_doc_id), 0)
+        current_index = _doc_index(ta, current_doc_id) or 0
 
         if ctx.triggered_id == "btn-prev" and current_index > 0:
             current_index -= 1
@@ -135,29 +136,57 @@ def setup_callbacks(tater_app: TaterApp) -> None:
 
         return _perform_navigation(ta, current_doc_id, current_index, timing_data, annotations_data, metadata_data)
 
-    # Menu item navigation (allow_duplicate=True required — see note above)
+    # Document selector. The static option list is built clientside once, at page
+    # load. Status, flag and the status/flag filter are read by docFilter /
+    # docRenderOption from a browser-side reference to metadata-store / filter-store
+    # when the dropdown renders, so status and flag changes never re-send the options.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="buildDocOptions"),
+        Output("document-select", "data"),
+        Input("doc-list-store", "data"),
+    )
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="updateDocSelectState"),
+        Output("doc-select-state-sink", "data"),
+        Input("metadata-store", "data"),
+        Input("filter-store", "data"),
+        State("doc-list-store", "data"),
+    )
+
+    # Keep the selector showing the current document.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="syncDocSelect"),
+        Output("document-select", "value"),
+        Input("current-doc-id", "data"),
+        Input("document-select", "data"),
+        State("document-select", "value"),
+    )
+
+    # Forward a user pick to doc-select-nav, filtering out the echo from
+    # syncDocSelect clientside so it never costs a server round-trip.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="docSelectChanged"),
+        Output("doc-select-nav", "data"),
+        Input("document-select", "value"),
+        State("current-doc-id", "data"),
+        prevent_initial_call=True,
+    )
+
+    # Selector navigation (allow_duplicate=True required — see note above)
     @app.callback(
         Output("current-doc-id", "data", allow_duplicate=True),
         Output("timing-store", "data", allow_duplicate=True),
         Output("metadata-store", "data", allow_duplicate=True),
         Output("status-store", "data", allow_duplicate=True),
-        Input({"type": "document-menu-item", "index": ALL}, "n_clicks"),
+        Input("doc-select-nav", "data"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
         State("annotations-store", "data"),
         State("metadata-store", "data"),
         prevent_initial_call=True
     )
-    def navigate_menu_item(menu_clicks, current_doc_id, timing_data, annotations_data, metadata_data):
-        ta = _ta()
-        if not ctx.triggered or not ta.documents:
-            return no_update, no_update, no_update, no_update
-
-        if not ctx.triggered[0]["value"]:
-            return no_update, no_update, no_update, no_update
-
-        new_index = ctx.triggered_id["index"]
-        return _perform_navigation(ta, current_doc_id, new_index, timing_data, annotations_data, metadata_data)
+    def navigate_select(nav, current_doc_id, timing_data, annotations_data, metadata_data):
+        return _navigate_select_impl(_ta(), nav, current_doc_id, timing_data, annotations_data, metadata_data)
 
     # Auto-advance: navigate to next doc when an auto_advance widget gets a value.
     # (allow_duplicate=True required — see note above)
@@ -177,23 +206,10 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         if not trigger:
             return no_update, no_update, no_update, no_update
         ta = _ta()
-        current_index = next(
-            (i for i, d in enumerate(ta.documents) if d.id == current_doc_id), 0
-        )
+        current_index = _doc_index(ta, current_doc_id) or 0
         if current_index >= len(ta.documents) - 1:
             return no_update, no_update, no_update, no_update
         return _perform_navigation(ta, current_doc_id, current_index + 1, timing_data, annotations_data, metadata_data)
-
-    # Refresh menu dropdown after any navigation, status change, or filter change.
-    @app.callback(
-        Output("document-menu-dropdown", "children"),
-        Input("timing-store", "data"),
-        Input("status-store", "data"),
-        Input("filter-store", "data"),
-        State("metadata-store", "data"),
-    )
-    def update_menu_items(timing_data, status_data, filter_data, metadata_data):
-        return _build_menu_items(_ta(), metadata_data, filter_data=filter_data)
 
     # Sync filter controls → filter-store.
     @app.callback(
@@ -309,45 +325,33 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call=True,
     )
 
-    # Load flag and notes from metadata when the document changes.
+    # Load flag and notes from metadata when the document changes. Outputs that
+    # already show the right value are skipped, so save_flag / save_notes (which
+    # send the whole metadata-store) don't fire on most navigations.
     @app.callback(
         Output("flag-document", "checked"),
         Output("document-notes", "value"),
         Input("current-doc-id", "data"),
         State("metadata-store", "data"),
+        State("flag-document", "checked"),
+        State("document-notes", "value"),
     )
-    def load_flag_and_notes(doc_id, metadata_data):
-        if not doc_id:
-            return False, ""
-        meta = _get_meta(metadata_data, doc_id)
-        return meta.get("flagged", False), meta.get("notes", "") or ""
+    def load_flag_and_notes(doc_id, metadata_data, shown_flag, shown_notes):
+        return _load_flag_and_notes_impl(doc_id, metadata_data, shown_flag, shown_notes)
 
-    # Handle flag-document changes
-    # Outputs to timing-store so update_menu_items re-runs after metadata is updated.
+    # Handle flag-document changes. Also fires when load_flag_and_notes sets the
+    # checkbox on navigation; the impl skips the write when nothing changed.
     @app.callback(
-        Output("timing-store", "data", allow_duplicate=True),
         Output("metadata-store", "data", allow_duplicate=True),
         Input("flag-document", "checked"),
         State("current-doc-id", "data"),
-        State("timing-store", "data"),
         State("metadata-store", "data"),
         prevent_initial_call=True,
     )
-    def save_flag(checked, doc_id, timing_data, metadata_data):
-        if not doc_id:
-            return no_update, no_update
+    def save_flag(checked, doc_id, metadata_data):
+        return _save_flag_impl(checked, doc_id, metadata_data)
 
-        metadata_data = dict(metadata_data or {})
-        meta = dict(_get_meta(metadata_data, doc_id))
-        meta["flagged"] = checked
-        metadata_data[doc_id] = meta
-
-        # Return timing-store unchanged to trigger update_menu_items (flag icon refresh).
-        # last_save_time is intentionally not updated here — in single mode, auto_save
-        # handles it when metadata-store changes; in hosted mode nothing is saved to file.
-        return timing_data, metadata_data
-
-    # Handle document-notes changes
+    # Handle document-notes changes (same no-op-on-navigation guard as save_flag).
     @app.callback(
         Output("metadata-store", "data", allow_duplicate=True),
         Input("document-notes", "value"),
@@ -356,14 +360,7 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call=True
     )
     def save_notes(notes, doc_id, metadata_data):
-        if not doc_id:
-            return no_update
-
-        metadata_data = dict(metadata_data or {})
-        meta = dict(_get_meta(metadata_data, doc_id))
-        meta["notes"] = notes if notes else ""
-        metadata_data[doc_id] = meta
-        return metadata_data
+        return _save_notes_impl(notes, doc_id, metadata_data)
 
     if has_instructions:
         app.clientside_callback(
@@ -625,6 +622,73 @@ def _on_doc_change_impl(ta, doc_id, timing_data, annotations_data, metadata_data
     return timing_data, status, metadata_data
 
 
+def _navigate_select_impl(ta, nav, current_doc_id, timing_data, annotations_data, metadata_data):
+    """Business logic for navigate_select callback.
+
+    ``nav`` is ``{"id": doc_id, "t": timestamp}`` written by the docSelectChanged
+    clientside callback. Returns the four navigation outputs, or all no_update
+    when the target is missing, unknown, or already the current document.
+    """
+    target_id = (nav or {}).get("id")
+    if not target_id or target_id == current_doc_id:
+        return no_update, no_update, no_update, no_update
+    new_index = _doc_index(ta, target_id)
+    if new_index is None:
+        return no_update, no_update, no_update, no_update
+    return _perform_navigation(ta, current_doc_id, new_index, timing_data, annotations_data, metadata_data)
+
+
+def _load_flag_and_notes_impl(doc_id, metadata_data, shown_flag, shown_notes):
+    """Business logic for load_flag_and_notes callback.
+
+    Returns (checked, notes) for the flag checkbox and notes textarea, with
+    no_update for any control that already shows the stored value.
+    """
+    if doc_id:
+        meta = _get_meta(metadata_data, doc_id)
+        flag, notes = bool(meta.get("flagged", False)), meta.get("notes", "") or ""
+    else:
+        flag, notes = False, ""
+    return (
+        no_update if bool(shown_flag) == flag else flag,
+        no_update if (shown_notes or "") == notes else notes,
+    )
+
+
+def _save_flag_impl(checked, doc_id, metadata_data):
+    """Business logic for save_flag callback.
+
+    Returns the updated metadata_data, or no_update when there is no current
+    document or the flag already has this value (e.g. set by load_flag_and_notes
+    on navigation) — avoiding a spurious metadata write and auto-save.
+    """
+    if not doc_id:
+        return no_update
+    meta = _get_meta(metadata_data, doc_id)
+    if bool(meta.get("flagged", False)) == bool(checked):
+        return no_update
+    metadata_data = dict(metadata_data or {})
+    meta = dict(meta)
+    meta["flagged"] = bool(checked)
+    metadata_data[doc_id] = meta
+    return metadata_data
+
+
+def _save_notes_impl(notes, doc_id, metadata_data):
+    """Business logic for save_notes callback. Same no-op guard as _save_flag_impl."""
+    if not doc_id:
+        return no_update
+    notes = notes or ""
+    meta = _get_meta(metadata_data, doc_id)
+    if (meta.get("notes") or "") == notes:
+        return no_update
+    metadata_data = dict(metadata_data or {})
+    meta = dict(meta)
+    meta["notes"] = notes
+    metadata_data[doc_id] = meta
+    return metadata_data
+
+
 def _toggle_pause_impl(n_clicks, timing_data, doc_id, metadata_data):
     """Business logic for toggle_pause callback.
 
@@ -706,13 +770,7 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call=True,
     )
     def update_status_from_annotations(annotations_data, doc_id, metadata_data):
-        if not doc_id:
-            return no_update, no_update
-        ta = _ta()
-        metadata_data = dict(metadata_data or {})
-        update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
-        status = metadata_data.get(doc_id, {}).get("status", "not_started")
-        return status, metadata_data
+        return _update_status_from_annotations_impl(_ta(), annotations_data, doc_id, metadata_data)
 
     # --- Clientside load: value prop --- push annotation values to widgets on doc change
     # or repeater delete.  ev-lookup-store supplies per-field empty values so the server
@@ -738,6 +796,26 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call="initial_duplicate",
     )
 
+
+
+def _update_status_from_annotations_impl(ta, annotations_data, doc_id, metadata_data):
+    """Business logic for update_status_from_annotations callback.
+
+    Returns (status, metadata_data), or (no_update, no_update) when there is no
+    current document or the status is unchanged — the common case for an edit, since
+    an edit never changes the in-flight status. Skipping the metadata-store write
+    avoids an extra full-store auto_save per edit.
+    """
+    if not doc_id:
+        return no_update, no_update
+    old_status = _get_meta(metadata_data, doc_id).get("status", "not_started")
+    metadata_data = dict(metadata_data or {})
+    metadata_data[doc_id] = dict(_get_meta(metadata_data, doc_id))
+    update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
+    status = metadata_data[doc_id].get("status", "not_started")
+    if status == old_status:
+        return no_update, no_update
+    return status, metadata_data
 
 
 def _decode_field_path(ld: str, path: str, tf: str) -> str:

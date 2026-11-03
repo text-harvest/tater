@@ -5,8 +5,6 @@ import time
 from typing import TYPE_CHECKING
 
 from dash import html, no_update
-import dash_mantine_components as dmc
-from dash_iconify import DashIconify
 from tater.ui import value_helpers
 from tater.ui.constants import STATUS_COLORS, STATUS_LABELS
 from tater.widgets.base import ContainerWidget, ControlWidget
@@ -180,52 +178,23 @@ def update_status_for_doc(tater_app: TaterApp, doc_id: str, annotations_data: di
 
 
 # ---------------------------------------------------------------------------
-# Navigation + menu
+# Navigation
 # ---------------------------------------------------------------------------
 
-def _build_menu_items(tater_app: TaterApp, metadata_data: dict | None, filter_data: dict | None = None) -> list:
-    """Build document menu items with status badges and flag indicators."""
-    filter_data = filter_data or {}
-    flagged_only = filter_data.get("flagged", False)
-    allowed_statuses = filter_data.get("statuses") or ["not_started", "in_progress", "complete"]
-    items = []
-    for i, doc in enumerate(tater_app.documents):
-        meta = _get_meta(metadata_data, doc.id)
-        flagged = meta.get("flagged", False)
-        if flagged_only and not flagged:
-            continue
-        status = meta.get("status", "not_started")
-        if status not in allowed_statuses:
-            continue
-        status_label, status_color = _status_display(status)
-        right_children = []
-        if flagged:
-            right_children.append(DashIconify(icon="tabler:flag-filled", color="red", width=14))
-        right_children.append(
-            dmc.Badge(
-                status_label,
-                color=status_color,
-                variant="light",
-                size="xs",
-            )
-        )
-        items.append(
-            dmc.MenuItem(
-                dmc.Group(
-                    [
-                        dmc.Text(f"{i + 1}. {doc.display_name()}", size="sm"),
-                        dmc.Group(right_children, gap="xs"),
-                    ],
-                    gap="xs",
-                    wrap="nowrap",
-                    justify="space-between",
-                ),
-                id={"type": "document-menu-item", "index": i},
-            )
-        )
-    if not items:
-        items.append(dmc.Text("No documents match filter", size="sm", c="dimmed", p="xs"))
-    return items
+def _doc_index(tater_app: TaterApp, doc_id: str | None) -> int | None:
+    """Return the position of *doc_id* in ``tater_app.documents``, or None.
+
+    The id → index dict is cached on the app and rebuilt whenever
+    ``documents`` is replaced, so lookups stay O(1) for large document sets.
+    """
+    if not doc_id:
+        return None
+    docs = tater_app.documents
+    cache = getattr(tater_app, "_doc_index_cache", None)
+    if cache is None or cache[0] is not docs:
+        cache = (docs, {d.id: i for i, d in enumerate(docs)})
+        tater_app._doc_index_cache = cache
+    return cache[1].get(doc_id)
 
 
 def _perform_navigation(

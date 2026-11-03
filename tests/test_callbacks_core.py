@@ -15,9 +15,15 @@ import types
 import pytest
 from dash import no_update
 
+from tater.models.document import Document
 from tater.ui.callbacks.core import (
+    _load_flag_and_notes_impl,
+    _navigate_select_impl,
     _on_doc_change_impl,
+    _save_flag_impl,
+    _save_notes_impl,
     _toggle_pause_impl,
+    _update_status_from_annotations_impl,
     _update_save_status_impl,
 )
 
@@ -294,3 +300,146 @@ class TestTogglePause:
         timing_in = {"doc_start_time": None}
         timing, _ = _toggle_pause_impl(1, timing_in, "doc1", {})
         assert timing["paused"] is True
+
+
+# ---------------------------------------------------------------------------
+# _navigate_select_impl
+# ---------------------------------------------------------------------------
+
+class TestNavigateSelect:
+    def _ta(self):
+        ta = _make_ta()
+        ta.documents = [Document(id=f"doc{i}", text="t") for i in range(1, 4)]
+        return ta
+
+    def test_navigates_to_selected_document(self):
+        doc_id, timing, metadata, status = _navigate_select_impl(
+            self._ta(), {"id": "doc3", "t": 1}, "doc1", {}, {}, {}
+        )
+        assert doc_id == "doc3"
+        assert timing["_nav_init"] is True
+        assert metadata["doc1"]["visited"] is True
+        assert metadata["doc3"]["visited"] is True
+
+    def test_same_document_is_noop(self):
+        result = _navigate_select_impl(self._ta(), {"id": "doc1", "t": 1}, "doc1", {}, {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
+
+    def test_unknown_document_is_noop(self):
+        result = _navigate_select_impl(self._ta(), {"id": "nope", "t": 1}, "doc1", {}, {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
+
+    @pytest.mark.parametrize("nav", [None, {}, {"id": None}, {"id": ""}])
+    def test_missing_target_is_noop(self, nav):
+        result = _navigate_select_impl(self._ta(), nav, "doc1", {}, {}, {})
+        assert result == (no_update, no_update, no_update, no_update)
+
+
+# ---------------------------------------------------------------------------
+# _load_flag_and_notes_impl
+# ---------------------------------------------------------------------------
+
+class TestLoadFlagAndNotes:
+    def test_loads_stored_values(self):
+        meta = {"doc2": {"flagged": True, "notes": "hi"}}
+        assert _load_flag_and_notes_impl("doc2", meta, False, "") == (True, "hi")
+
+    def test_skips_controls_already_showing_value(self):
+        # Common case: navigating between unflagged docs without notes must not
+        # set either control (which would re-fire save_flag / save_notes).
+        assert _load_flag_and_notes_impl("doc2", {}, False, "") == (no_update, no_update)
+        assert _load_flag_and_notes_impl("doc2", {}, None, None) == (no_update, no_update)
+
+    def test_updates_only_changed_control(self):
+        meta = {"doc2": {"flagged": False, "notes": "n"}}
+        assert _load_flag_and_notes_impl("doc2", meta, False, "") == (no_update, "n")
+        meta = {"doc2": {"flagged": True, "notes": ""}}
+        assert _load_flag_and_notes_impl("doc2", meta, False, "") == (True, no_update)
+
+    def test_clears_when_previous_doc_had_values(self):
+        assert _load_flag_and_notes_impl("doc2", {}, True, "old") == (False, "")
+
+    def test_no_doc_resets(self):
+        assert _load_flag_and_notes_impl("", {}, True, "x") == (False, "")
+
+
+# ---------------------------------------------------------------------------
+# _save_flag_impl / _save_notes_impl
+# ---------------------------------------------------------------------------
+
+class TestSaveFlag:
+    def test_sets_flag(self):
+        metadata = _save_flag_impl(True, "doc1", {"doc1": {"flagged": False}})
+        assert metadata["doc1"]["flagged"] is True
+
+    def test_clears_flag(self):
+        metadata = _save_flag_impl(False, "doc1", {"doc1": {"flagged": True}})
+        assert metadata["doc1"]["flagged"] is False
+
+    def test_unchanged_value_is_noop(self):
+        # load_flag_and_notes sets the checkbox on every navigation; that must not
+        # write metadata-store (which would trigger auto_save).
+        assert _save_flag_impl(True, "doc1", {"doc1": {"flagged": True}}) is no_update
+        assert _save_flag_impl(False, "doc1", {"doc1": {"flagged": False}}) is no_update
+
+    def test_unchanged_default_is_noop(self):
+        assert _save_flag_impl(False, "doc1", {}) is no_update
+        assert _save_flag_impl(None, "doc1", None) is no_update
+
+    def test_no_doc_is_noop(self):
+        assert _save_flag_impl(True, "", {}) is no_update
+
+    def test_does_not_mutate_input(self):
+        metadata_in = {"doc1": {"flagged": False}}
+        _save_flag_impl(True, "doc1", metadata_in)
+        assert metadata_in["doc1"]["flagged"] is False
+
+
+class TestSaveNotes:
+    def test_sets_notes(self):
+        metadata = _save_notes_impl("hello", "doc1", {"doc1": {"notes": ""}})
+        assert metadata["doc1"]["notes"] == "hello"
+
+    def test_clears_notes(self):
+        metadata = _save_notes_impl(None, "doc1", {"doc1": {"notes": "hello"}})
+        assert metadata["doc1"]["notes"] == ""
+
+    def test_unchanged_value_is_noop(self):
+        assert _save_notes_impl("hello", "doc1", {"doc1": {"notes": "hello"}}) is no_update
+
+    def test_empty_and_none_are_equivalent(self):
+        assert _save_notes_impl(None, "doc1", {"doc1": {"notes": ""}}) is no_update
+        assert _save_notes_impl("", "doc1", {"doc1": {"notes": None}}) is no_update
+        assert _save_notes_impl("", "doc1", {}) is no_update
+
+    def test_no_doc_is_noop(self):
+        assert _save_notes_impl("hello", None, {}) is no_update
+
+
+# ---------------------------------------------------------------------------
+# _update_status_from_annotations_impl
+# ---------------------------------------------------------------------------
+
+class TestUpdateStatusFromAnnotations:
+    def test_unchanged_status_is_noop(self):
+        # An edit on a visited doc keeps it in_progress; writing metadata-store anyway
+        # would trigger a second full-store auto_save per edit.
+        meta = {"doc1": {"visited": True, "status": "in_progress"}}
+        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta) == (no_update, no_update)
+
+    def test_unvisited_not_started_is_noop(self):
+        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", {}) == (no_update, no_update)
+
+    def test_changed_status_is_written(self):
+        meta = {"doc1": {"visited": True, "status": "not_started"}}
+        status, metadata = _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
+        assert status == "in_progress"
+        assert metadata["doc1"]["status"] == "in_progress"
+
+    def test_does_not_mutate_input(self):
+        meta = {"doc1": {"visited": True, "status": "not_started"}}
+        _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
+        assert meta["doc1"]["status"] == "not_started"
+
+    def test_no_doc_is_noop(self):
+        assert _update_status_from_annotations_impl(_make_ta(), {}, None, {}) == (no_update, no_update)

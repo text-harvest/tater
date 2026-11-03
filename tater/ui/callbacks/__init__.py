@@ -27,7 +27,7 @@ from tater.ui.callbacks.helpers import (
     _collect_all_control_templates,
     update_status_for_doc,
     _is_complete_eligible,
-    _build_menu_items,
+    _doc_index,
     _perform_navigation,
 )
 
@@ -47,7 +47,7 @@ __all__ = [
     "_get_meta",
     "_has_value",
     "update_status_for_doc",
-    "_build_menu_items",
+    "_doc_index",
     "_perform_navigation",
     "_decode_field_path",
 ]

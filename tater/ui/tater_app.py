@@ -2,6 +2,8 @@
 from typing import Optional, Type, Any
 from pathlib import Path
 import json
+import os
+import tempfile
 
 from tater.models.document import DocumentMetadata
 
@@ -41,6 +43,23 @@ def _build_span_color_map(widgets: list, parent_pipe: str = "") -> dict:
         elif isinstance(w, ContainerWidget) and hasattr(w, "children"):
             result.update(_build_span_color_map(w.children, w_pipe))
     return result
+
+
+def _write_json_atomic(path: Path, data: Any) -> None:
+    """Write *data* as JSON via a temp file and rename, so a crash mid-write
+    never leaves a truncated annotations file. Each call gets its own temp file
+    because auto_save requests can run concurrently."""
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        # mkstemp creates 0600; keep the existing file's mode (or a normal 0644).
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class TaterApp:
@@ -92,6 +111,11 @@ class TaterApp:
         self.metadata: dict[str, DocumentMetadata] = {}
         self._save_error: str | None = None
         self._schema_warnings: dict[str, list[str]] = {}
+        # Server copy of annotations-store / metadata-store as plain dicts. Built
+        # lazily from annotations/metadata and replaced on every save, so each page
+        # load serves the latest state rather than what was loaded at startup.
+        self._ann_data: dict[str, dict] | None = None
+        self._meta_data: dict[str, dict] | None = None
 
     def load_documents(self, source) -> bool:
         """Load documents from a file path, a list of dicts, or a DataFrame.
@@ -144,6 +168,7 @@ class TaterApp:
                     self.annotations[doc.id] = self.schema_model()
                 if doc.id not in self.metadata:
                     self.metadata[doc.id] = DocumentMetadata()
+            self._ann_data = self._meta_data = None
 
             print(f"Loaded {label}")
             return True
@@ -242,8 +267,24 @@ class TaterApp:
                 self.app._tater_callbacks_registered = True
 
     def _setup_layout(self) -> None:
-        """Create the Dash layout with navigation and annotation panel."""
-        self.app.layout = layout.build_layout(self)
+        """Create the Dash layout with navigation and annotation panel.
+
+        Built per page load (a function, not a fixed component) so a refresh or a
+        new tab gets the current stores from _store_data(), not the startup state.
+        """
+        self.app.layout = lambda: layout.build_layout(self)
+
+    def _store_data(self) -> tuple[dict, dict]:
+        """Return the current ({doc_id: annotations}, {doc_id: metadata}) dicts."""
+        if self._ann_data is None or self._meta_data is None:
+            self._ann_data = {doc_id: ann.model_dump() for doc_id, ann in self.annotations.items()}
+            self._meta_data = {doc_id: meta.model_dump() for doc_id, meta in self.metadata.items()}
+        return self._ann_data, self._meta_data
+
+    def _set_store_data(self, annotations_data: dict, metadata_data: dict) -> None:
+        """Replace the server copy of the stores with what the browser last sent."""
+        self._ann_data = annotations_data
+        self._meta_data = metadata_data
 
     def _load_annotations_from_dict(self, data: dict) -> None:
         """Load annotations from an in-memory dict (same format as the JSON file)."""
@@ -268,6 +309,7 @@ class TaterApp:
 
     def _apply_annotations_data(self, data: dict) -> None:
         """Apply a parsed annotations dict to self.annotations and self.metadata."""
+        self._ann_data = self._meta_data = None
         try:
             from tater.models.document import DocumentMetadata
             extra_fields: set[str] = set()
@@ -312,6 +354,7 @@ class TaterApp:
             doc_id: The document whose annotation triggered this save. When provided
                 and an ``on_save`` hook is configured, the hook is called after writing.
         """
+        self._set_store_data(annotations_data or {}, metadata_data or {})
         try:
             path = Path(self.annotations_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,8 +367,7 @@ class TaterApp:
                     "metadata": (metadata_data or {}).get(d_id, {}),
                 }
 
-            with open(path, "w") as f:
-                json.dump(save_dict, f, indent=2)
+            _write_json_atomic(path, save_dict)
             self._save_error = None
 
             if self.on_save and doc_id and (annotations_data or {}).get(doc_id) is not None:
@@ -360,9 +402,10 @@ class TaterApp:
                     "metadata": meta.model_dump(),
                 }
 
-            with open(path, 'w') as f:
-                json.dump(save_dict, f, indent=2)
+            _write_json_atomic(path, save_dict)
             self._save_error = None
+            # annotations/metadata are the source here; rebuild the store copy from them.
+            self._ann_data = self._meta_data = None
 
             if self.on_save and doc_id and doc_id in self.annotations:
                 try:
@@ -475,8 +518,8 @@ class TaterApp:
         """Return current annotations as {doc_id: annotation_dict}.
 
         Reads from the annotations file when available (reflects the latest
-        auto-saved state). Falls back to the in-memory snapshot loaded at
-        startup when no file path is configured.
+        auto-saved state). Falls back to the server's copy of the annotations
+        store when no file path is configured.
         """
         if self.annotations_path:
             path = Path(self.annotations_path)
@@ -484,4 +527,4 @@ class TaterApp:
                 with open(path) as f:
                     data = json.load(f)
                 return {doc_id: doc_data.get("annotations", {}) for doc_id, doc_data in data.items()}
-        return {doc_id: ann.model_dump() for doc_id, ann in self.annotations.items()}
+        return dict(self._store_data()[0])

@@ -117,7 +117,7 @@ Nothing is registered when tracing is off, so there's no overhead.
 
 - the same `output` fired more than twice in one action
 - `req_bytes` or `resp_bytes` above 100 KB
-- `status == 204`, meaning the callback ran and changed nothing
+- `status == 204`, meaning the callback ran and changed nothing. Skip callbacks with no outputs, such as hosted mode's `mirror_stores`, which always return 204.
 
 It prints a per-action table, and `run.py` includes the flags in its summary.
 

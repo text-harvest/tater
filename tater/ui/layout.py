@@ -50,6 +50,9 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
     # Static per-doc info preloaded for the clientside nav-info callback.
     doc_list_store = dcc.Store(id="doc-list-store", data=_build_doc_list_store_data(tater_app))
 
+    # Latest saved state, not the startup state — build_layout runs on every page load.
+    ann_data, meta_data = tater_app._store_data()
+
     # Global span stores — always included so span callbacks are always registered
     span_stores = [
         dcc.Store(id="span-any-change", data=0),
@@ -159,14 +162,8 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
             dcc.Store(id="aa-fields-store", data=list(tater_app._aa_fields)),
             dcc.Store(id="ev-lookup-store", data=tater_app._ev_lookup),
             dcc.Store(id="schema-warnings-store", data=tater_app._schema_warnings),
-            dcc.Store(id="annotations-store", data={
-                doc_id: ann.model_dump()
-                for doc_id, ann in tater_app.annotations.items()
-            }),
-            dcc.Store(id="metadata-store", data={
-                doc_id: meta.model_dump()
-                for doc_id, meta in tater_app.metadata.items()
-            }),
+            dcc.Store(id="annotations-store", data=ann_data),
+            dcc.Store(id="metadata-store", data=meta_data),
             dcc.Interval(id="clock-interval", interval=1000, n_intervals=0),
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
             dcc.Store(id="doc-select-nav", data=None),

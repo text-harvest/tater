@@ -571,6 +571,32 @@ class TestSaveRestore:
         assert "doc1" in app2.annotations
         assert app2.annotations["doc1"].label == "uncertain"
 
+    def test_page_refresh_keeps_annotations(self, dash_duo, tater_required):
+        """A browser refresh shows the latest annotations and doesn't overwrite the file.
+
+        The layout used to be built once at startup, so a refresh brought back the
+        startup state and the next auto-save wrote it over the saved edits.
+        """
+        dash_duo.start_server(tater_required.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        js_click(dash_duo, "input[type='radio'][value='uncertain']")
+        time.sleep(0.8)  # wait for auto_save
+        assert read_saved(tater_required)["doc1"]["annotations"]["label"] == "uncertain"
+
+        dash_duo.driver.refresh()
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        time.sleep(0.8)  # page-load callbacks and any auto_save they trigger
+        assert dash_duo.find_element("input[type='radio'][value='uncertain']").is_selected()
+
+        js_click(dash_duo, "#btn-next")
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        js_click(dash_duo, "input[type='radio'][value='positive']")
+        time.sleep(0.8)
+
+        saved = read_saved(tater_required)
+        assert saved["doc1"]["annotations"]["label"] == "uncertain"
+        assert saved["doc2"]["annotations"]["label"] == "positive"
+
     def test_no_restore_skips_loading(self, dash_duo, tater_required, docs_file, tmp_path):
         """--no-restore (restore_annotations=False) means prior annotations are ignored."""
         dash_duo.start_server(tater_required.app)

@@ -371,3 +371,102 @@ class TestSaveFileFormat:
         app = TaterApp(schema_model=FlatSchema)
         app.load_documents(str(docs_path))
         assert app.annotations_path == str(tmp_path / "my_docs_annotations.json")
+
+
+# ---------------------------------------------------------------------------
+# Server copy of the stores (page refresh must serve the latest save)
+# ---------------------------------------------------------------------------
+
+def _layout_store(app, store_id):
+    """Fetch the layout the way a page load does and return one store's data."""
+    def find(node):
+        if isinstance(node, dict):
+            if node.get("props", {}).get("id") == store_id:
+                return node["props"]["data"]
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            return None
+        for child in children:
+            found = find(child)
+            if found is not None:
+                return found
+        return None
+
+    return find(app.app.server.test_client().get("/_dash-layout").get_json())
+
+
+class TestStoreCopy:
+    def _app(self, tmp_path, docs_file):
+        from tater.widgets import TextInputWidget
+        app = make_app(FlatSchema, tmp_path / "ann.json")
+        app.load_documents(docs_file)
+        app.set_annotation_widgets([TextInputWidget("overall", label="Overall")])
+        return app
+
+    def test_page_load_serves_latest_save(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        ann, meta = app._store_data()
+        ann = {**ann, "doc1": {**ann["doc1"], "overall": "edited"}}
+        meta = {**meta, "doc1": {**meta["doc1"], "flagged": True}}
+        app._save_stores_to_file(ann, meta, doc_id="doc1")
+
+        assert _layout_store(app, "annotations-store")["doc1"]["overall"] == "edited"
+        assert _layout_store(app, "metadata-store")["doc1"]["flagged"] is True
+
+    def test_page_load_before_any_save_serves_loaded_state(self, tmp_path, docs_file):
+        ann_path = tmp_path / "ann.json"
+        ann_path.write_text(json.dumps({"doc1": {"annotations": {"overall": "from file"}, "metadata": {}}}))
+        app = self._app(tmp_path, docs_file)
+
+        assert _layout_store(app, "annotations-store")["doc1"]["overall"] == "from file"
+
+    def test_reloading_annotations_resets_copy(self, tmp_path, docs_file):
+        app = make_app(FlatSchema, tmp_path / "ann.json")
+        app.load_documents(docs_file)
+        app._set_store_data({"doc1": {"overall": "stale"}}, {})
+        app._load_annotations_from_dict({"doc1": {"annotations": {"overall": "new"}, "metadata": {}}})
+
+        assert app._store_data()[0]["doc1"]["overall"] == "new"
+
+    def test_get_annotations_without_file_uses_copy(self, docs_file):
+        app = TaterApp(schema_model=FlatSchema)
+        app.load_documents(json.loads(open(docs_file).read()))
+        ann, meta = app._store_data()
+        app._set_store_data({**ann, "doc1": {**ann["doc1"], "overall": "live"}}, meta)
+
+        assert app.get_annotations()["doc1"]["overall"] == "live"
+
+
+class TestAtomicSave:
+    def test_failed_write_keeps_previous_file(self, tmp_path, single_doc_file, monkeypatch):
+        ann_path = tmp_path / "ann.json"
+        app = make_app(FlatSchema, ann_path)
+        app.load_documents(single_doc_file)
+        app.annotations["doc1"].overall = "first"
+        app._save_annotations_to_file()
+
+        def broken_dump(obj, f, **kwargs):
+            f.write('{"doc1": {"annotat')
+            raise OSError("disk full")
+
+        monkeypatch.setattr(json, "dump", broken_dump)
+        app.annotations["doc1"].overall = "second"
+        app._save_annotations_to_file()
+        monkeypatch.undo()
+
+        assert json.loads(ann_path.read_text())["doc1"]["annotations"]["overall"] == "first"
+        assert app._save_error == "disk full"
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_save_keeps_file_permissions(self, tmp_path, single_doc_file):
+        ann_path = tmp_path / "ann.json"
+        app = make_app(FlatSchema, ann_path)
+        app.load_documents(single_doc_file)
+        app._save_annotations_to_file()
+        assert ann_path.stat().st_mode & 0o777 == 0o644
+
+        ann_path.chmod(0o640)
+        app._save_annotations_to_file()
+        assert ann_path.stat().st_mode & 0o777 == 0o640

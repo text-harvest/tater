@@ -96,7 +96,15 @@ outputs, execution counts, and kernel metadata on `git add`).
   `auto_save` server callback fires on store changes and calls `TaterApp._save_stores_to_file()`
   to persist to disk. `auto_save` is not registered in hosted mode (`annotations_path` is
   `None`); annotations live in the browser and the user downloads them explicitly.
-  Format: `{doc_id: {annotations: {...}, metadata: {...}}}`.
+  Format: `{doc_id: {annotations: {...}, metadata: {...}}}`. Saves write a temp file and
+  `os.replace` it (`_write_json_atomic`), so a crash never leaves a truncated file.
+- **Server copy of the stores**: `TaterApp._store_data()` returns the current
+  `(annotations, metadata)` dicts. It's built lazily from `annotations` / `metadata` and replaced
+  on every save (`_set_store_data`, called by `_save_stores_to_file`; in hosted mode by the
+  output-less `mirror_stores` callback). The layout is a function (`_setup_layout`, and
+  `serve_layout` in hosted mode) that reads `_store_data()`, so a refresh or a new tab gets the
+  latest state. Don't build the stores from `annotations` / `metadata` directly — those hold the
+  startup state, and a stale page load is overwritten into the file by the next auto-save.
 - **value_helpers**: `get_model_value` / `set_model_value` in `tater/ui/value_helpers.py`
   handle dot-path reads/writes into nested Pydantic model instances.
 - **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `current-doc-id`
@@ -426,13 +434,13 @@ uv run pytest tests/ --headless                        # full suite
 - `test_bind_schema.py` — `bind_schema` for all widget types (happy path + error cases)
 - `test_component_id.py` — `component_id` and `conditional_wrapper_id` derivation
 - `test_decode_field_path.py` — `_decode_field_path` for standalone, single-repeater, and doubly-nested cases
-- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings
+- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
-- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore, and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
+- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
 
-**Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` auto-installs a matching ChromeDriver via `webdriver-manager` on first run.
+**Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` uses a ChromeDriver from `webdriver-manager`'s cache (`~/.wdm`) that matches the installed Chrome, found offline by `_cached_chromedriver`. It only calls `ChromeDriverManager().install()`, which always goes to the network, when no match is cached, e.g. on first run or after a Chrome update.
 
 **`conftest.py`** defines shared Pydantic model fixtures (`Schema`, `Pet`, `Finding`, `Measurements`, etc.) used across unit tests, and the `pytest_setup_options` hook for browser driver configuration.
 

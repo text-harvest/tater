@@ -373,6 +373,16 @@ def setup_callbacks(tater_app: TaterApp) -> None:
     is_hosted = tater_app.is_hosted
 
     if is_hosted:
+        # No auto-save in hosted mode, but keep the session's copy of the stores
+        # current so a page refresh doesn't fall back to the uploaded state.
+        @app.callback(
+            Input("annotations-store", "data"),
+            Input("metadata-store", "data"),
+            prevent_initial_call=True,
+        )
+        def mirror_stores(annotations_data, metadata_data):
+            _ta()._set_store_data(annotations_data or {}, metadata_data or {})
+
         # Download annotations as JSON
         @app.callback(
             Output("download-annotations", "data"),

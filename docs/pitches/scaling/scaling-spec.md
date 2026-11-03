@@ -210,12 +210,12 @@ The summary lists, for each action:
 
 ## Phase 2 — Fixes (provisional order)
 
-### 2.1 Refresh bug and atomic saves — land first, as their own PR
+### 2.1 Server mirror, per-request layout, atomic saves — do first
 
-These are data-loss fixes, needed whatever the perf numbers say.
+These fix the refresh bug above and are the base that 2.4 builds on, so they come first whatever the perf numbers say. They don't need a separate bugfix PR, since there are no real users yet. The fix for two open tabs is the per-document saves in 2.4: tabs then conflict only on a document both edited. A guard against stale tabs (refusing saves from an older tab) is deliberately left out.
 
-- **Keep the in-memory state current.** Keep a plain-dict mirror on `TaterApp`, `self._ann_data` / `self._meta_data`, initialised from `self.annotations` / `self.metadata` after loading. `_save_stores_to_file` updates the mirror as well as the file. In hosted mode, add a lightweight `mirror_stores` callback with the same inputs as `auto_save` that only updates the mirror (no file). That keeps refresh correct there too, and it's replaced by the delta store in 2.4.
-- **Build the layout per request.** `set_annotation_widgets` assigns `self.app.layout = lambda: layout.build_layout(self)`. `build_layout` reads the mirror for the two stores.
+- **Keep the in-memory state current.** Keep a plain-dict mirror on `TaterApp`, `self._ann_data` / `self._meta_data`, initialised from `self.annotations` / `self.metadata` after loading. Until 2.4 lands, `_save_stores_to_file` updates the mirror from the full stores as well as writing the file. In hosted mode, add a lightweight `mirror_stores` callback with the same inputs as `auto_save` that only updates the mirror (no file). That keeps refresh correct there too. Both switch to `save-delta` in 2.4.
+- **Build the layout per request.** `set_annotation_widgets` assigns `self.app.layout = lambda: layout.build_layout(self)`, and `build_layout` reads the two stores from the mirror. Without this, 2.4 alone still loses work: after a refresh the browser holds startup values, and the first delta for a document overwrites the saved version.
 - **Atomic writes.** Both save methods write `path.with_name(path.name + ".tmp")` and then `os.replace(tmp, path)`.
 - **Tests.**
   - A unit test: save, fetch `/_dash-layout`, and assert the store reflects the save.
@@ -307,6 +307,5 @@ If the initial payload at 10k (realistic, filled) is above threshold, don't fill
 
 ## Open questions
 
-- **Refresh fix timing.** Should 2.1 go out as a bugfix ahead of the perf work (recommended), with its own issue?
 - **Thresholds.** 100 ms at 10k and the frequency weights in Phase 1 are a starting point. Adjust them after seeing the baseline.
 - **Trace and #109.** Does the callback trace stay a hidden debug flag, or get documented for users? #109's agents will read it either way.

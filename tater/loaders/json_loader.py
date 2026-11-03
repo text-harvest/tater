@@ -32,7 +32,7 @@ Schema format::
           "id": "diagnosis",
           "type": "hierarchical_label",
           "widget": {
-            "type": "hierarchical_label_tags",
+            "type": "hierarchical_label_select",
             "label": "Diagnosis",
             "hierarchy_ref": "ontology",
           }

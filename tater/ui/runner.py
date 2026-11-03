@@ -55,6 +55,7 @@ def run_single(args) -> None:
         schema_model=schema_model,
         restore_annotations=not args.no_restore,
     )
+    _install_trace(app.app.server, args)
 
     if not app.load_documents(args.documents):
         return
@@ -65,6 +66,13 @@ def run_single(args) -> None:
         register_callbacks(app)
 
     app.run(debug=args.debug, port=args.port, host=args.host)
+
+
+def _install_trace(server, args) -> None:
+    """Turn on the callback trace when --trace / TATER_TRACE is set."""
+    if getattr(args, "trace", None):
+        from tater.ui.trace import install_trace
+        install_trace(server, args.trace)
 
 
 def run_hosted(args) -> None:
@@ -81,6 +89,7 @@ def run_hosted(args) -> None:
         use_pages=False,
     )
     app.server.secret_key = os.environ.get("TATER_SECRET_KEY") or _random_secret_key()
+    _install_trace(app.server, args)
 
     # Cache: session_id → TaterApp. Callbacks are registered once per session_id.
     # Oldest entry is evicted when the cache exceeds TATER_SESSION_CACHE_MAX.

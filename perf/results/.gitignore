@@ -1,0 +1,5 @@
+# Only committed baselines are kept; dated runs stay local.
+*
+!.gitignore
+!baseline.md
+!baseline.csv

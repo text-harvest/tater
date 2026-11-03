@@ -25,6 +25,7 @@ tater/                  # Library package
     document_loader.py  # load_documents(path) — dispatches on extension;
                         #   _load_tabular accepts Path or file-like (StringIO/BytesIO)
   ui/                   # App machinery (TaterApp, layout, callbacks, value_helpers)
+    trace.py            # install_trace: --trace / TATER_TRACE callback trace for perf/
     upload_layout.py    # Hosted-mode upload page layout + callbacks;
                         #   also contains _LLM_PROMPT constant and _build_llm_prompt_modal()
     schema_builder.py   # No-code schema builder modal for hosted mode
@@ -44,6 +45,8 @@ apps/
     schema/             # JSON schema-file examples
     data/               # Sample documents and ontologies (e.g. pet_ontology.yaml)
     notebooks/          # Jupyter notebook examples (simple_annotation.ipynb)
+perf/                   # Performance harness (#108): synthetic projects, Playwright
+                        #   measurements, callback-trace report. Not in the wheel or pytest run.
 spec/                   # Design documents (see below)
 ```
 
@@ -64,8 +67,10 @@ tater --hosted [--port 8050] [--host 0.0.0.0]
 ```
 
 CLI flags: `--documents` (required in single mode), `--config` or `--schema` (one required in single mode),
-`--annotations`, `--no-restore`, `--port`, `--host`, `--debug`, `--hosted`
-(also via `TATER_APP_PORT` / `TATER_APP_HOST` / `TATER_APP_DEBUG` env vars).
+`--annotations`, `--no-restore`, `--port`, `--host`, `--debug`, `--hosted`, `--trace PATH`
+(also via `TATER_APP_PORT` / `TATER_APP_HOST` / `TATER_APP_DEBUG` / `TATER_TRACE` env vars).
+`--trace` appends one JSON line per callback request (output, trigger, bytes, ms, status) and adds
+`POST /_tater/trace/action` to label them; nothing is registered without it.
 
 Notebook examples (`apps/examples/notebooks/`) use `tater.annotate()` with `jupyter_mode="inline"`
 or `"tab"`. Install notebook extras with `uv sync --extra notebook`. Run `uv run nbstripout --install`
@@ -329,6 +334,18 @@ as the progress bar. Check new callbacks against these rules:
 `TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests per action at
 2,500 documents. Keep it passing.
 
+To measure a change, run the harness in `perf/` (needs `uv run playwright install chromium` once):
+
+```bash
+uv run python -m perf.run --sizes 500,10000 --schema checkbox,realistic --filled both
+uv run python -m perf.trace_report <trace.jsonl>      # per-action table for one trace
+```
+
+It writes `perf/results/<date>-<sha>.{csv,md}`: per action, requests, bytes up/down, settle time,
+long tasks, the ratio of the largest size to 500, and trace flags (an output fired more than twice,
+a request or response over 100 KB, a 204 that changed nothing). Only `perf/results/baseline.*`
+is committed. The design is in `docs/pitches/scaling/scaling-spec.md`.
+
 ## Widget conventions
 
 Widget base class hierarchy in `base.py`:
@@ -440,6 +457,7 @@ uv run pytest tests/ --headless                        # full suite
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
+- `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
 - `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
 
 **Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` uses a ChromeDriver from `webdriver-manager`'s cache (`~/.wdm`) that matches the installed Chrome, found offline by `_cached_chromedriver`. It only calls `ChromeDriverManager().install()`, which always goes to the network, when no match is cached, e.g. on first run or after a Chrome update.

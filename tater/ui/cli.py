@@ -51,6 +51,12 @@ def parse_args() -> Namespace:
         help="Enable debug mode with hot reloading (or set TATER_APP_DEBUG env var)"
     )
     parser.add_argument(
+        "--trace",
+        default=os.getenv("TATER_TRACE") or None,
+        metavar="PATH",
+        help="Append a JSON line per callback request to PATH, for the perf harness (or TATER_TRACE env var)",
+    )
+    parser.add_argument(
         "--port",
         type=int,
         default=int(os.getenv("TATER_APP_PORT", "8050")),

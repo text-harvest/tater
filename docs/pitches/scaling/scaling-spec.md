@@ -49,9 +49,11 @@ Hosted mode builds layouts per request in `serve_layout`, but from the session `
 
 ## Phase 0 — Measurement harness
 
+Built. The sections below describe it as implemented; differences from the original plan are noted.
+
 ### Dependencies
 
-`uv add --dev playwright psutil`, then once per machine `uv run playwright install chromium`. The existing dash.testing/Selenium tests are unchanged.
+`uv add --dev playwright psutil`, then once per machine `uv run playwright install chromium`. The existing dash.testing/Selenium tests are unchanged. Playwright installs its own Chromium, separate from the Google Chrome the Selenium tests use.
 
 ### Layout
 
@@ -77,7 +79,7 @@ perf/
 class Project:
     docs: list[dict]                 # [{"id", "text", "name"}]
     annotations: dict[str, dict]     # saved-file format: {doc_id: {"annotations": ..., "metadata": ...}}
-    config_source: str               # Python config module text (schema + widgets)
+    schema: dict                     # tater JSON schema
 
 def make_project(
     n_docs: int,                     # 50 | 500 | 2_500 | 10_000
@@ -89,18 +91,21 @@ def make_project(
 ) -> Project: ...
 ```
 
-- `"checkbox"` is the `LabelsSchema` from `tests/test_browser.py`.
+- The schema is a JSON schema rather than Python config text (a change from the plan), so one definition serves single mode (`tater --schema`) and hosted mode (`_build_session_app_from_data`).
+- `"checkbox"` matches the `LabelsSchema` from `tests/test_browser.py`.
 - `"realistic"` follows `apps/examples/config/gallery.py`: a choice, a boolean, a text area, a repeater of items with a nested choice, a span field, a hierarchical label (small inline tree), and one conditional.
-- Text is generated from a fixed word list with a seeded RNG, so every run is reproducible. Use synthetic data only.
-- `write_project(project, dir) -> (config_path, docs_path, annotations_path)` writes the files the CLI needs.
+- Text is cut at random offsets from one pool generated from a fixed word list with a seeded RNG, so every run is reproducible and a 10k project builds in well under a second. Use synthetic data only.
+- `filled=True` annotates every document and marks it complete, with about 5% flagged. Spans are spread evenly through the text.
+- `LENGTHS = {"short": 200, "medium": 50_000, "long": 1_000_000}`.
+- `write_project(project, dir) -> (schema_path, docs_path, annotations_path)` writes the files the CLI needs. `annotations.json` is written only for a filled project; the path is returned either way, since tater saves there.
 
 ### `server.py`
 
-`run_tater(dir, *, hosted=False, trace_path=None) -> ContextManager[ServerInfo]` starts `tater --config … --documents …` (or `--hosted`) with `subprocess.Popen` on a free port. It waits until `/` responds and yields `ServerInfo(url, pid)`. A subprocess keeps server memory measurable (`psutil.Process(pid).memory_info().rss`) and matches real use.
+`run_tater(dir, *, hosted=False, trace_path=None) -> ContextManager[ServerInfo]` starts `tater --schema … --documents … --annotations …` (or `--hosted`) with `subprocess.Popen` on a free port, logging to `dir/server.log`. It waits until `/` responds and yields `ServerInfo(url, pid, trace_path)`. A subprocess keeps server memory measurable (`psutil.Process(pid).memory_info().rss`) and matches real use.
 
 ### Callback trace (in tater)
 
-Enabled by `TATER_TRACE=<path>`, or by `--trace <path>` added to the CLI next to `--debug`. When enabled, `TaterApp` registers Flask hooks on `app.server`:
+Enabled by `TATER_TRACE=<path>`, or by `--trace <path>` added to the CLI next to `--debug`. When enabled, `tater/ui/trace.py:install_trace` registers Flask hooks on the Dash server. The runner calls it once in both modes, not `TaterApp` (a change from the plan): in hosted mode there's a `TaterApp` per session on one shared server, which would register the hooks again for every session.
 
 - `before_request` on `/_dash-update-component`: record the start time, the request byte length, and the `output` and `changedPropIds` fields from the JSON body.
 - `after_request`: record the duration, the response byte length, and the status (Dash returns **204** when a callback changes nothing). Append one JSON line to the trace file:
@@ -117,16 +122,18 @@ Nothing is registered when tracing is off, so there's no overhead.
 
 - the same `output` fired more than twice in one action
 - `req_bytes` or `resp_bytes` above 100 KB
-- `status == 204`, meaning the callback ran and changed nothing. Skip callbacks with no outputs, such as hosted mode's `mirror_stores`, which always return 204.
+- `status == 204`, meaning the callback ran and changed nothing. Skip callbacks with no outputs, such as hosted mode's `mirror_stores`, which always return 204. Dash sends such a callback's `output` as a bare hash with no `.`.
 
-It prints a per-action table, and `run.py` includes the flags in its summary.
+The repeat flag is skipped for journeys, where callbacks repeat by design. The size flags report the largest request or response per output. `short_output` turns Dash's output strings into readable names (`current-doc-id.data, timing-store.data`, `{hl-select}.value`).
+
+`python -m perf.trace_report trace.jsonl` prints a per-action table, and `run.py` lists the flags under each summary table.
 
 ### `measure.py`
 
 ```python
 class ActionRecorder:
     def __init__(self, page: Page, server: ServerInfo): ...
-    def measure(self, label: str, action: Callable[[Page], None], repeats: int = 5) -> ActionResult: ...
+    def measure(self, label, action: Callable[[Page], bool | None], repeats=5, setup=None, journey=False) -> ActionResult: ...
 
 @dataclass
 class ActionResult:
@@ -138,14 +145,17 @@ class ActionResult:
     settle_ms: float         # action start → quiet
     long_task_ms: float      # sum of long tasks (>50 ms) during the action
     heap_mb: float           # performance.memory.usedJSHeapSize after the action
+    server_rss_mb: float     # tater's RSS after the action
+    check: bool | None       # the action's own correctness check, if it has one
+    flags: list[str]         # trace flags
 ```
 
 How each value is measured:
 
-- **Requests and bytes:** `page.on("request")` / `page.on("response")`, filtered to `_dash-update-component`.
+- **Requests and bytes:** `page.on("request")` / `page.on("requestfinished")`, filtered to `_dash-update-component`. Upload is the request body; download is `request.sizes()["responseBodySize"]`. In-flight requests are tracked as a set, so requests already running when the recorder attaches don't skew the count.
 - **Long tasks:** collected by a `PerformanceObserver({type: "longtask", buffered: true})` installed with `page.add_init_script`.
-- **Settle:** no Dash request in flight for 500 ms *and* `document.title` isn't `"Updating..."`.
-- **Repeats:** the reported value is the median of `repeats` runs, all in headless Chromium.
+- **Settle:** time from the action's start to the last callback response, once no Dash request has been in flight for 500 ms *and* `document.title` isn't `"Updating..."`. Clientside-only work, such as rendering the document, shows in long tasks, not settle.
+- **Repeats:** the reported value is the median of `repeats` runs, all in headless Chromium. `setup` runs untimed before each run, e.g. to jump back to document 1 when a run of Next clicks would pass the end.
 
 ### `actions.py`
 
@@ -156,7 +166,8 @@ Single actions:
 | `page_load` | load the page |
 | `next` | click Next |
 | `tick` | tick a checkbox |
-| `type_text` | type 20 characters into a text field |
+| `type_notes` | type 20 characters into the document notes (metadata path) |
+| `type_text` | type 20 characters into a text area widget (annotations path, `realistic` only) |
 | `add_span` | select text and add a span (`realistic` only) |
 | `selector_search` | open the selector and type a 3-character query |
 
@@ -170,7 +181,9 @@ Journeys:
 | `reload_resume` | annotate, reload the page, check the values survived, annotate again, check the file |
 | `rapid_clicks` | 10 Next clicks without waiting |
 
-`reload_resume` fails today because of the refresh bug above, which makes it a real check, not only a timing.
+`reload_resume` and `rapid_clicks` check their own result: values survive the reload and match the file, and all ten clicks land. `reload_resume` would have failed before 2.1 fixed the refresh bug.
+
+Controls are found by the `tf` key of their pattern-matching ID; labels aren't linked to inputs, so `get_by_label` doesn't work. The selector is driven with `fill()`, since clicking it leaves the current document's name in the input.
 
 ### `bench_server.py`
 
@@ -178,9 +191,9 @@ Runs without a browser. For each size, it times:
 
 - `TaterApp.load_documents` + `set_annotation_widgets` (startup)
 - `_save_stores_to_file` with a filled project, along with the resulting file size
-- RSS after startup
+- RSS after startup, and the growth due to the project
 
-In hosted mode it measures RSS growth per `_build_session_app_from_data` call, for 1, 5 and 20 sessions.
+Each case runs in a fresh subprocess, after a warm-up on a one-document project so import and first-`Dash()` costs aren't counted. In hosted mode it measures RSS growth per `_build_session_app_from_data` call, for 1, 5 and 20 sessions; the per-session figure is (20 − 1) / 19, since the first session also registers the shared callbacks.
 
 ### `run.py`
 
@@ -189,13 +202,16 @@ uv run python -m perf.run --sizes 50,500,2500,10000 --lengths short,medium,long 
     --schema checkbox,realistic --filled both --repeats 5 --out perf/results/
 ```
 
-It writes `perf/results/<date>-<git-sha>.csv`, with one row per (size, length, schema, filled, action), plus a Markdown summary.
+It writes `perf/results/<date>-<git-sha>.csv`, with one row per (size, length, schema, filled, action), plus a Markdown summary of the same name. Both are written as each scenario finishes, so a stopped run keeps what it measured; the summary says "incomplete" until the run ends. The sha gets `-dirty` when `tater/` has uncommitted changes. Only `baseline.md` / `baseline.csv` are committed (`perf/results/.gitignore`).
+
+Other options: `--journey-repeats` (default 1), `--spans` (spans per document in filled `realistic` projects, default 10), `--no-bench`, `--headed`, and `--max-total-chars` (default 150M), which skips projects too big to generate and load: long documents at 10k would be 10 GB of text. Skipped cases are listed in the summary.
 
 The summary lists, for each action:
 
 - the 10k value
 - the ratio of the 10k value to the 500 value. A ratio well above 1 means the cost grows with N, which is the signal to investigate.
 - the trace flags
+- the server timings from `bench_server.py`, unless `--no-bench`
 
 ## Phase 1 — Baseline and ranking
 

@@ -105,6 +105,8 @@ outputs, execution counts, and kernel metadata on `git add`).
   `serve_layout` in hosted mode) that reads `_store_data()`, so a refresh or a new tab gets the
   latest state. Don't build the stores from `annotations` / `metadata` directly — those hold the
   startup state, and a stale page load is overwritten into the file by the next auto-save.
+  Likewise `current-doc-id` starts at `TaterApp.current_doc_index`, which `_perform_navigation`
+  sets, so a refresh reopens the last document (in memory only; a restart opens the first).
 - **value_helpers**: `get_model_value` / `set_model_value` in `tater/ui/value_helpers.py`
   handle dot-path reads/writes into nested Pydantic model instances.
 - **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `current-doc-id`

@@ -430,6 +430,23 @@ class TestStoreCopy:
 
         assert app._store_data()[0]["doc1"]["overall"] == "new"
 
+    def test_page_load_opens_last_navigated_doc(self, tmp_path, docs_file):
+        from tater.ui.callbacks.helpers import _perform_navigation
+        app = self._app(tmp_path, docs_file)
+        assert _layout_store(app, "current-doc-id") == "doc1"
+
+        ann, meta = app._store_data()
+        _perform_navigation(app, "doc1", 1, {}, ann, meta)
+
+        assert _layout_store(app, "current-doc-id") == "doc2"
+
+    def test_reloading_documents_opens_first_doc(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app.current_doc_index = 1
+        app.load_documents(docs_file)
+
+        assert _layout_store(app, "current-doc-id") == "doc1"
+
     def test_get_annotations_without_file_uses_copy(self, docs_file):
         app = TaterApp(schema_model=FlatSchema)
         app.load_documents(json.loads(open(docs_file).read()))

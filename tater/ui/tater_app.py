@@ -104,6 +104,7 @@ class TaterApp:
         self._get_current_app = getattr(self.app, '_tater_get_current_app', None)
         self.widgets: list[TaterWidget] = []
         self.documents: list[Document] = []
+        # Index of the document last navigated to; a page load opens there.
         self.current_doc_index = 0
         self.annotations: dict[str, BaseModel] = {}
         # Store metadata (DocumentMetadata) separately from annotations
@@ -169,6 +170,7 @@ class TaterApp:
                 if doc.id not in self.metadata:
                     self.metadata[doc.id] = DocumentMetadata()
             self._ann_data = self._meta_data = None
+            self.current_doc_index = 0
 
             print(f"Loaded {label}")
             return True

@@ -223,6 +223,8 @@ def _perform_navigation(
         metadata_data[current_doc_id] = meta
 
     doc_id = tater_app.documents[new_index].id if new_index < len(tater_app.documents) else ""
+    if doc_id:
+        tater_app.current_doc_index = new_index
 
     # Mark the new doc as visited and compute its status here, so on_doc_change
     # can skip its own metadata/timing writes when it sees _nav_init=True.

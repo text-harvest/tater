@@ -52,6 +52,8 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
 
     # Latest saved state, not the startup state — build_layout runs on every page load.
     ann_data, meta_data = tater_app._store_data()
+    docs = tater_app.documents
+    current_doc_id = docs[min(tater_app.current_doc_index, len(docs) - 1)].id if docs else ""
 
     # Global span stores — always included so span callbacks are always registered
     span_stores = [
@@ -155,7 +157,7 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
                     ),
                 ],
             ),
-            dcc.Store(id="current-doc-id", data=tater_app.documents[0].id if tater_app.documents else ""),
+            dcc.Store(id="current-doc-id", data=current_doc_id),
             dcc.Store(id="timing-store", data={"last_save_time": None, "doc_start_time": None, "session_start_time": None, "annotation_seconds_at_load": 0.0}),
             dcc.Store(id="status-store", data="not_started"),
             dcc.Store(id="auto-advance-store", data=0),

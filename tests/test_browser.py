@@ -572,7 +572,7 @@ class TestSaveRestore:
         assert app2.annotations["doc1"].label == "uncertain"
 
     def test_page_refresh_keeps_annotations(self, dash_duo, tater_required):
-        """A browser refresh shows the latest annotations and doesn't overwrite the file.
+        """A browser refresh shows the latest annotations and document, and doesn't overwrite the file.
 
         The layout used to be built once at startup, so a refresh brought back the
         startup state and the next auto-save wrote it over the saved edits.
@@ -596,6 +596,11 @@ class TestSaveRestore:
         saved = read_saved(tater_required)
         assert saved["doc1"]["annotations"]["label"] == "uncertain"
         assert saved["doc2"]["annotations"]["label"] == "positive"
+
+        # A refresh reopens the document the user was on, not the first one.
+        dash_duo.driver.refresh()
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        assert dash_duo.find_element("input[type='radio'][value='positive']").is_selected()
 
     def test_no_restore_skips_loading(self, dash_duo, tater_required, docs_file, tmp_path):
         """--no-restore (restore_annotations=False) means prior annotations are ignored."""

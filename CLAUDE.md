@@ -296,6 +296,29 @@ via `ld + path` ensures repeater items match only their own row's controls.
 `conditionalClear` (clears the widget value when its controlling field hides it) is registered
 via MATCH IDs only for widgets inside repeaters. Flat conditionals do not get a clear callback.
 
+## Performance rules
+
+Projects can hold up to ~10,000 documents (#108). An action on one document should do work
+that doesn't grow with the number of documents — the exceptions are a few cheap summaries, such
+as the progress bar. Check new callbacks against these rules:
+
+- **No per-document components.** Don't render one component per document, and don't use
+  pattern-matching IDs keyed by document. At ~2,500 docs they froze the UI for seconds per
+  action (#107). Build list data once and read live state clientside (see Document selector).
+- **No full stores as server callback inputs.** Dash sends a store's whole value with every
+  request that lists it as `Input` or `State`. `annotations-store` and `metadata-store` hold
+  every document, so each such callback ships them in full. Prefer clientside callbacks, or
+  pass only the current document's data. Return `Patch()` instead of a rebuilt dict when
+  changing one document.
+- **No catch-all triggers.** Don't trigger on a whole store or an `ALL` pattern when only one
+  field or document matters. Every extra trigger is another round trip, and chains of them run
+  one after another.
+- **Return `no_update` when nothing changed.** A write that repeats the current value still
+  fires every dependent callback, and for the stores it also triggers an auto-save.
+
+`TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests per action at
+2,500 documents. Keep it passing.
+
 ## Widget conventions
 
 Widget base class hierarchy in `base.py`:

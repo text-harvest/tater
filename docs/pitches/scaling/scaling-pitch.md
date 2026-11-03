@@ -20,7 +20,7 @@ Support up to **10,000 documents** in a single project, with Next, ticking a che
 
 Before changing anything, build a way to generate synthetic projects and measure them:
 
-- **Number of documents:** 1k, 2.5k, 10k.
+- **Number of documents:** 50, 500, 2.5k, 10k.
 - **Document length:** a sentence, a few pages, a book chapter.
 - **Annotation density:** an empty project, and one where every document is filled in, including many highlighted spans.
 - **Schema:** a single checkbox group, or a realistic mix with repeaters, spans, hierarchical labels and conditional fields.
@@ -33,9 +33,29 @@ For each common action (page load, Next, ticking a checkbox, typing, adding a sp
 - how long until things settle
 - how long the browser is blocked
 
-We also record startup time, save time and memory.
+We also record startup time, save time and memory. Each measurement is the median of several runs in a headless browser, so one slow run doesn't skew the table.
 
-That gives one table. We rank its entries by **cost per action times how often the action happens**. Next and checkbox ticks happen thousands of times per session; startup happens once. Anything that stays under about a tenth of a second at 10k drops off the list.
+Single actions don't show everything, so we also script a few realistic user journeys:
+
+- annotate and click Next twenty times
+- jump around using the document selector
+- flag a few documents, then filter to the flagged ones
+- reload the page and resume
+- click rapidly
+
+Some costs only appear in sequences like these: work that accumulates, saves that pile up, or state that goes stale.
+
+To see *why* an action is slow, tater gets a debug trace. For each user action it logs which server steps ran, in what order, how much data each sent and how long each took. The trace flags the obvious problems automatically:
+
+- a step firing more than twice for one action
+- a payload over about 100 KB
+- a step that runs and changes nothing
+
+The trace tells us which steps to fix first.
+
+The harness uses Playwright rather than the Selenium setup the current browser tests use. Playwright can see network traffic, browser stalls, and CPU and network slowdown directly, and LLM agents can drive the same tool. That's what [#109](https://github.com/text-harvest/tater/issues/109) builds on. The existing browser tests stay as they are.
+
+The result is one table. We rank its entries by **cost per action times how often the action happens**. Next and checkbox ticks happen thousands of times per session; startup happens once. Anything that stays under about a tenth of a second at 10k drops off the list.
 
 ### Then fix, in roughly this order
 
@@ -61,6 +81,19 @@ The baseline decides the final order, but we expect something like this.
 
 Extend the existing large-project browser tests to check the amount of data sent per action, not just the number of requests. The data per action should stay about the same whether a project has 1k documents or 10k. Add a 10k case that doesn't run by default.
 
+We also write down the patterns that caused these problems as short rules in the project's guidance for contributors and coding agents:
+
+- no per-document components
+- no full collections as inputs to server steps
+- no catch-all triggers
+- do nothing when nothing changed
+
+Reviewers, human or agent, can then check new changes against them.
+
+### What comes after
+
+[#109](https://github.com/text-harvest/tater/issues/109) builds on this harness. It adds LLM agents that act out annotator personas and report anomalies, random-action testing that checks the UI against the saved file, and load testing with several hosted users. None of that is part of this pitch, but the harness should be easy for it to reuse.
+
 ### Hosted mode
 
 Once single mode is in shape, apply the same measurements to hosted mode. Hosted mode never auto-saves, but it has the same problem of whole collections travelling with each request, so most of the single-mode work carries over. What's specific to hosted mode is memory: each session holds its own full copy of its project. We'd measure how memory grows with sessions × documents, and look at sharing content between sessions for the built-in examples.
@@ -77,3 +110,4 @@ Once single mode is in shape, apply the same measurements to hosted mode. Hosted
 - Replacing Dash, or a separate frontend.
 - Changing the annotations file format that people download and load.
 - Real-time collaboration, or several annotators on one project.
+- LLM agent testing, random-action testing, and load testing with several users. Those belong to [#109](https://github.com/text-harvest/tater/issues/109).

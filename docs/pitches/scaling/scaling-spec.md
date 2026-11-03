@@ -152,7 +152,7 @@ class ActionResult:
 
 How each value is measured:
 
-- **Requests and bytes:** `page.on("request")` / `page.on("requestfinished")`, filtered to `_dash-update-component`. Upload is the request body; download is `request.sizes()["responseBodySize"]`. In-flight requests are tracked as a set, so requests already running when the recorder attaches don't skew the count.
+- **Requests and bytes:** counted in the page by `INIT_SCRIPT`, which wraps `fetch` for `_dash-update-component` and keeps request count, bytes up (request body), bytes down (`Content-Length`), requests in flight and the time the last one finished. The counts live in `sessionStorage`, so a reload during an action keeps them. This replaced Playwright's `page.on("request")` events (a change from the plan): Playwright keeps every request it reports, upload included, for the life of the page, and at 10k realistic documents (tens of MB uploaded per action) the runner and its driver grew past 1.7 GB each and ran WSL out of memory.
 - **Long tasks:** collected by a `PerformanceObserver({type: "longtask", buffered: true})` installed with `page.add_init_script`.
 - **Settle:** time from the action's start to the last callback response, once no Dash request has been in flight for 500 ms *and* `document.title` isn't `"Updating..."`. Clientside-only work, such as rendering the document, shows in long tasks, not settle.
 - **Repeats:** the reported value is the median of `repeats` runs, all in headless Chromium. `setup` runs untimed before each run, e.g. to jump back to document 1 when a run of Next clicks would pass the end.

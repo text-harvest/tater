@@ -212,7 +212,7 @@ def make_actions(sc: Scenario) -> list[Action]:
         try:
             wait_position(page, p + 10, timeout=30_000)
         except Exception:
-            return False
+            pass  # slow isn't wrong: at 10k the clicks take ~50 s to settle; check after
         sc.wait_quiet()
         return position(page) == p + 10
 

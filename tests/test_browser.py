@@ -31,8 +31,10 @@ def read_saved(tater) -> dict:
 
     Flag/notes are persisted to disk via auto_save (server-side callback).
     tater.metadata is not updated during a browser session — the source of
-    truth is the file written by _save_stores_to_file.
+    truth is the file. Writes are throttled (save_interval), so pending edits
+    are flushed first; the server runs in this process.
     """
+    tater.flush_saves()
     return json.loads(Path(tater.annotations_path).read_text())
 
 

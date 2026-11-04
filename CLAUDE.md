@@ -104,7 +104,12 @@ outputs, execution counts, and kernel metadata on `git add`).
   `initSaveBaseline` records the stores as loaded. The `auto_save` server callback takes only
   `save-delta`, and `TaterApp._save_delta_to_file()` merges it into the server copy (ignoring a
   delta older than one already applied to that document from the same page) and writes the file
-  from that copy. This relies on store writers replacing only the documents they change (a
+  from that copy, at most once per `save_interval` (default 2 s): the first save after a quiet
+  spell is written at once, later ones within the interval by one write at its end, on a
+  background thread that serializes a shallow snapshot, so merging never waits on the disk.
+  `flush_saves()` writes what's pending; it runs at exit (`atexit`; the CLI turns SIGTERM into
+  a normal exit), and tests call it before reading the file (`read_saved` in
+  `test_browser.py`). `get_annotations()` returns the server copy, not the file, which can lag. This relies on store writers replacing only the documents they change (a
   `Patch()`, or `Object.assign({}, store, {[id]: newDoc})` clientside); a writer that rebuilds
   every document's object still saves correctly but sends every document. `on_save` is called
   for each document whose annotations were in the delta. `auto_save` is not registered in hosted mode (`annotations_path` is
@@ -489,7 +494,7 @@ uv run pytest tests/ --headless                        # full suite
 - `test_bind_schema.py` — `bind_schema` for all widget types (happy path + error cases)
 - `test_component_id.py` — `component_id` and `conditional_wrapper_id` derivation
 - `test_decode_field_path.py` — `_decode_field_path` for standalone, single-repeater, and doubly-nested cases
-- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), atomic writes
+- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction

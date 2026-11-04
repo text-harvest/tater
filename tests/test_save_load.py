@@ -458,11 +458,13 @@ class TestStoreCopy:
 
 class TestSaveDelta:
     """save-delta (#108): the browser sends only changed documents; the server merges
-    them into its copy of the stores and writes the file from it."""
+    them into its copy of the stores and writes the file from it. save_interval=0
+    writes on every save; TestThrottledSave covers the interval."""
 
     def _app(self, tmp_path, docs_file):
         from tater.widgets import TextInputWidget
         app = make_app(FlatSchema, tmp_path / "ann.json")
+        app.save_interval = 0
         app.load_documents(docs_file)
         app.set_annotation_widgets([TextInputWidget("overall", label="Overall")])
         return app
@@ -539,6 +541,85 @@ class TestSaveDelta:
         ann = {**app._store_data()[0]["doc1"], "overall": "live"}
         assert app._apply_save_delta({"page": "p", "seq": 1, "docs": {"doc1": {"annotations": ann}}}) == ["doc1"]
         assert app.get_annotations()["doc1"]["overall"] == "live"
+
+
+class TestThrottledSave:
+    """save_interval: edits are merged at once, the file is written at most once per
+    interval by a background thread, and flush_saves() writes what's pending."""
+
+    def _app(self, tmp_path, docs_file, interval=30.0):
+        from tater.widgets import TextInputWidget
+        app = make_app(FlatSchema, tmp_path / "ann.json")
+        app.save_interval = interval
+        app.load_documents(docs_file)
+        app.set_annotation_widgets([TextInputWidget("overall", label="Overall")])
+        return app
+
+    def _delta(self, app, seq, value):
+        ann = {**app._store_data()[0]["doc1"], "overall": value}
+        return {"page": "p", "seq": seq, "docs": {"doc1": {"annotations": ann}}}
+
+    def _saved_overall(self, tmp_path):
+        return json.loads((tmp_path / "ann.json").read_text())["doc1"]["annotations"]["overall"]
+
+    def _wait_for_file(self, tmp_path, timeout=5.0):
+        import time
+        deadline = time.time() + timeout
+        while not (tmp_path / "ann.json").exists():
+            assert time.time() < deadline, "first save was not written"
+            time.sleep(0.01)
+
+    def test_first_save_is_written_promptly(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app._save_delta_to_file(self._delta(app, 1, "a"))
+        self._wait_for_file(tmp_path)
+        assert self._saved_overall(tmp_path) == "a"
+
+    def test_saves_within_interval_wait_for_flush(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app._save_delta_to_file(self._delta(app, 1, "a"))
+        self._wait_for_file(tmp_path)
+        app._save_delta_to_file(self._delta(app, 2, "b"))
+        app._save_delta_to_file(self._delta(app, 3, "c"))
+        assert self._saved_overall(tmp_path) == "a"  # merged, not yet written
+        assert app.get_annotations()["doc1"]["overall"] == "c"
+        app.flush_saves()
+        assert self._saved_overall(tmp_path) == "c"
+
+    def test_flush_without_edits_writes_nothing(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app.flush_saves()
+        assert not (tmp_path / "ann.json").exists()
+
+    def test_on_save_called_once_per_write(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        calls = []
+        app.on_save = lambda doc_id, ann: calls.append((doc_id, ann.overall))
+        app._save_delta_to_file(self._delta(app, 1, "a"))
+        self._wait_for_file(tmp_path)
+        app.flush_saves()  # waits for the background write, if still running
+        calls.clear()
+        app._save_delta_to_file(self._delta(app, 2, "b"))
+        app._save_delta_to_file(self._delta(app, 3, "c"))
+        app.flush_saves()
+        assert calls == [("doc1", "c")]
+
+    def test_failed_write_stays_pending(self, tmp_path, docs_file, monkeypatch):
+        import tater.ui.tater_app as tater_app_module
+        app = self._app(tmp_path, docs_file)
+        real = tater_app_module._write_json_atomic
+
+        def broken(path, data):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(tater_app_module, "_write_json_atomic", broken)
+        app.save_interval = 0
+        app._save_delta_to_file(self._delta(app, 1, "a"))
+        assert app._save_error == "disk full"
+        monkeypatch.setattr(tater_app_module, "_write_json_atomic", real)
+        app.flush_saves()
+        assert self._saved_overall(tmp_path) == "a"
+        assert app._save_error is None
 
 
 class TestAtomicSave:

@@ -529,7 +529,7 @@ results = app.get_annotations()
 # {'doc_000': {'sentiment': 'positive', 'confidence': 'high', 'notes': ''}, ...}
 ```
 
-**Auto-save**: when `documents` is a file path, annotations are saved automatically to `<documents>_annotations.json`. For in-memory documents (list of dicts or DataFrame), pass `annotations_path` explicitly:
+**Auto-save**: when `documents` is a file path, annotations are saved automatically to `<documents>_annotations.json`. The file is written at most once every 2 seconds, and pending edits are written when tater exits; `get_annotations()` always returns the latest edits. For in-memory documents (list of dicts or DataFrame), pass `annotations_path` explicitly:
 
 ```python
 docs = [

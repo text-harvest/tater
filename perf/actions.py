@@ -6,6 +6,7 @@ runs untimed before each run, e.g. to make room for a run of Next clicks.
 """
 import json
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -89,6 +90,18 @@ def _saved_tick(path: Path, doc_id: str, schema: str) -> Optional[bool]:
     if schema == "checkbox":
         return "a" in (ann.get("labels") or [])
     return bool(ann.get("reviewed"))
+
+
+def _file_has(path: Path, expected: dict, schema: str, timeout: float = 5.0) -> bool:
+    """True once the annotations file shows ``expected`` ({doc_id: ticked}). tater writes
+    the file at most once per save interval (2 s by default), so it can lag the page."""
+    deadline = time.time() + timeout
+    while True:
+        if all(_saved_tick(path, d, schema) == v for d, v in expected.items()):
+            return True
+        if time.time() > deadline:
+            return False
+        time.sleep(0.1)
 
 
 def _doc_id(k: int) -> str:
@@ -201,8 +214,7 @@ def make_actions(sc: Scenario) -> list[Action]:
         target().click()
         sc.wait_quiet()
         second = target().is_checked()
-        return (ok and _saved_tick(sc.annotations_path, _doc_id(p), sc.schema) == first
-                and _saved_tick(sc.annotations_path, _doc_id(p + 1), sc.schema) == second)
+        return ok and _file_has(sc.annotations_path, {_doc_id(p): first, _doc_id(p + 1): second}, sc.schema)
 
     def rapid_clicks(page: Page) -> bool:
         """Ten Next clicks without waiting all land."""

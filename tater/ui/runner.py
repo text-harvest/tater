@@ -1,5 +1,7 @@
 """Entry point for the ``tater`` CLI command."""
 import os
+import signal
+import sys
 
 from tater.ui.cli import parse_args
 from tater.ui.tater_app import TaterApp
@@ -65,6 +67,9 @@ def run_single(args) -> None:
     if register_callbacks is not None:
         register_callbacks(app)
 
+    # A terminated server (SIGTERM, e.g. from a process manager) exits normally, so
+    # atexit writes edits still waiting on the save interval.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     app.run(debug=args.debug, port=args.port, host=args.host)
 
 

@@ -349,6 +349,8 @@ A new store `save-delta` carries only what changed:
 
 ### 2.5 Cheaper persistence
 
+**Built (debounce).** `TaterApp(save_interval=2.0)`: each save-delta is merged into the server copy at once; the file is written by a background thread, at once if the last write was over `save_interval` ago, else at the end of the interval, covering every save in between. The write serializes a shallow snapshot taken under the merge lock, so a keystroke's request never waits on the disk. `flush_saves()` writes what's pending: at exit (`atexit`; `run_single` turns SIGTERM into a normal exit), before tests read the file, and after a failed write (the edits stay pending). `get_annotations()` now returns the server copy, which every save updates, instead of reading the file. A crash (not a normal exit or SIGTERM) loses at most the last interval of edits; the SQLite option below wasn't needed.
+
 The baseline measured `_save_stores_to_file` at 266 ms at 10k (realistic, filled), on every edit; 2.4 doesn't change that, since the file is still written whole.
 
 - **First option: debounce.** Write at most once per 2 s from the mirror, and flush on shutdown with `atexit`. The annotations file format doesn't change.

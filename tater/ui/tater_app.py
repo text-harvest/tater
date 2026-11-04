@@ -4,7 +4,9 @@ from pathlib import Path
 import json
 import os
 import tempfile
+import atexit
 import threading
+import time
 
 from tater.models.document import DocumentMetadata
 
@@ -77,6 +79,7 @@ class TaterApp:
         is_hosted: bool = False,
         dash_app: Optional[Any] = None,
         restore_annotations: bool = True,
+        save_interval: float = 2.0,
     ):
         """
         Initialize the Tater app.
@@ -90,6 +93,9 @@ class TaterApp:
             is_hosted: If True, running in hosted mode (no auto-save, download button shown)
             dash_app: External Dash app to register callbacks on (hosted mode)
             restore_annotations: If False, skip loading existing annotations on startup
+            save_interval: Write the annotations file at most once per this many seconds.
+                Edits are merged into memory at once and written by a background thread;
+                pending edits are written at exit. 0 writes on every save.
         """
         self.title = title or "tater - document annotation"
         self.description = description
@@ -123,6 +129,17 @@ class TaterApp:
         # and writing: Dash may run two auto_save requests at once.
         self._delta_seq: dict[str, tuple[str, int]] = {}
         self._save_lock = threading.Lock()
+        # Throttled file writes (2.5 in the scaling spec): _dirty marks merged edits not
+        # yet written; _write_lock keeps two writers off the same temp file.
+        self.save_interval = save_interval
+        self._dirty = False
+        self._pending_hooks: set[str] = set()
+        self._save_timer: threading.Timer | None = None
+        self._timer_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._last_write = 0.0
+        if annotations_path:
+            atexit.register(self.flush_saves)
 
     def load_documents(self, source) -> bool:
         """Load documents from a file path, a list of dicts, or a DataFrame.
@@ -385,8 +402,48 @@ class TaterApp:
         if not applied:
             return False
         docs = delta["docs"]
-        self._write_store_data([d for d in applied if docs[d].get("annotations") is not None])
+        with self._save_lock:
+            self._dirty = True
+            self._pending_hooks.update(d for d in applied if docs[d].get("annotations") is not None)
+        if self.save_interval <= 0:
+            self.flush_saves()
+        else:
+            self._schedule_flush()
         return True
+
+    def _schedule_flush(self) -> None:
+        """Write soon: now if the last write was over ``save_interval`` ago, else when
+        the interval is up. Saves arriving meanwhile are covered by that one write."""
+        with self._timer_lock:
+            if self._save_timer is not None:
+                return
+            delay = max(0.0, self._last_write + self.save_interval - time.monotonic())
+            self._save_timer = threading.Timer(delay, self.flush_saves)
+            self._save_timer.daemon = True
+            self._save_timer.start()
+
+    def flush_saves(self) -> None:
+        """Write merged edits not yet in the annotations file, if any.
+
+        Runs on the save timer, at exit, and wherever the file must be current (e.g.
+        before reading it). A failed write leaves the edits pending for the next one.
+        """
+        with self._timer_lock:
+            if self._save_timer is not None and self._save_timer is not threading.current_thread():
+                self._save_timer.cancel()
+            self._save_timer = None
+            # The interval runs from the start of this write, so a save arriving while
+            # it runs is scheduled for the interval's end, not straight after.
+            self._last_write = time.monotonic()
+        with self._save_lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+            hooks, self._pending_hooks = self._pending_hooks, set()
+        if not self._write_store_data(sorted(hooks)):
+            with self._save_lock:
+                self._dirty = True
+                self._pending_hooks |= hooks
 
     def _save_stores_to_file(
         self,
@@ -408,12 +465,19 @@ class TaterApp:
         self._set_store_data(annotations_data or {}, metadata_data or {})
         self._write_store_data([doc_id] if doc_id else [])
 
-    def _write_store_data(self, hook_doc_ids: list[str]) -> None:
+    def _write_store_data(self, hook_doc_ids: list[str]) -> bool:
         """Write the server copy of the stores to the annotations file, then call
-        ``on_save`` for each of ``hook_doc_ids`` that has annotations."""
+        ``on_save`` for each of ``hook_doc_ids`` that has annotations. Returns False
+        if the write failed.
+
+        Serializes a shallow snapshot taken under ``_save_lock``, so merging new deltas
+        isn't blocked while the file is written (deltas replace document entries, they
+        never mutate them).
+        """
         try:
-            with self._save_lock:
-                annotations_data, metadata_data = self._store_data()
+            with self._write_lock:
+                with self._save_lock:
+                    annotations_data, metadata_data = (dict(d) for d in self._store_data())
                 path = Path(self.annotations_path)
                 path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -429,7 +493,7 @@ class TaterApp:
         except Exception as e:
             self._save_error = str(e)
             print(f"Error saving annotations: {e}")
-            return
+            return False
 
         if self.on_save and self.schema_model:
             for d_id, ann in hook_anns.items():
@@ -437,6 +501,7 @@ class TaterApp:
                     self.on_save(d_id, self.schema_model(**ann))
                 except Exception as hook_err:
                     print(f"on_save hook error: {hook_err}")
+        return True
 
     def _save_annotations_to_file(self, doc_id: Optional[str] = None) -> None:
         """Save all annotations to the annotations file.
@@ -574,14 +639,8 @@ class TaterApp:
     def get_annotations(self) -> dict:
         """Return current annotations as {doc_id: annotation_dict}.
 
-        Reads from the annotations file when available (reflects the latest
-        auto-saved state). Falls back to the server's copy of the annotations
-        store when no file path is configured.
+        From the server's copy of the annotations store, which every save updates at
+        once — the file can lag behind it by up to ``save_interval``.
         """
-        if self.annotations_path:
-            path = Path(self.annotations_path)
-            if path.exists():
-                with open(path) as f:
-                    data = json.load(f)
-                return {doc_id: doc_data.get("annotations", {}) for doc_id, doc_data in data.items()}
-        return dict(self._store_data()[0])
+        with self._save_lock:
+            return dict(self._store_data()[0])

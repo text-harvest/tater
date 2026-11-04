@@ -326,6 +326,16 @@ dcc.Store(id="current-doc-slice", data=None)
 
 ### 2.4 Save deltas
 
+**Built.** Differences from the plan below:
+
+- **Changed documents are found by object identity,** not by checking only the current and previous documents. `Patch()` and the clientside writers replace only the document they change, so comparing each document's object with the previous call's finds every changed document, whatever changed it, in one pass over the keys. Only those are serialized and compared with the JSON last sent. `initSaveBaseline` records the stores at page load as the first baseline.
+- **A delta carries only the changed part** (`annotations` and/or `metadata`) of each document, so `on_save` is called only for documents whose annotations changed. It used to be called with the current document on every save, metadata-only ones included.
+- **Ordering uses `page` + `seq`:** `seq` restarts on each page load, so the server ignores a delta only if one with the same `page` and an equal or higher `seq` was applied to that document. Merging and writing run under a lock.
+- **`auto_save` writes `timing-store` as a `Patch`** (`last_save_time` only), so it no longer overwrites timing changes made meanwhile.
+- `download_annotations` (hosted, rare) still takes the full stores.
+
+Planned design:
+
 A new store `save-delta` carries only what changed:
 
 ```json

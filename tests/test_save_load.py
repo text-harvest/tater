@@ -456,6 +456,91 @@ class TestStoreCopy:
         assert app.get_annotations()["doc1"]["overall"] == "live"
 
 
+class TestSaveDelta:
+    """save-delta (#108): the browser sends only changed documents; the server merges
+    them into its copy of the stores and writes the file from it."""
+
+    def _app(self, tmp_path, docs_file):
+        from tater.widgets import TextInputWidget
+        app = make_app(FlatSchema, tmp_path / "ann.json")
+        app.load_documents(docs_file)
+        app.set_annotation_widgets([TextInputWidget("overall", label="Overall")])
+        return app
+
+    def _saved(self, tmp_path):
+        return json.loads((tmp_path / "ann.json").read_text())
+
+    def _ann(self, app, doc_id, value):
+        return {**app._store_data()[0][doc_id], "overall": value}
+
+    def test_writes_changed_doc_and_keeps_others(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        assert app._save_delta_to_file(
+            {"page": "p", "seq": 1, "docs": {"doc1": {"annotations": self._ann(app, "doc1", "edited")}}})
+        saved = self._saved(tmp_path)
+        assert saved["doc1"]["annotations"]["overall"] == "edited"
+        assert set(saved) == {"doc1", "doc2"}
+
+    def test_metadata_only(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        meta = {**app._store_data()[1]["doc2"], "flagged": True}
+        app._save_delta_to_file({"page": "p", "seq": 1, "docs": {"doc2": {"metadata": meta}}})
+        saved = self._saved(tmp_path)
+        assert saved["doc2"]["metadata"]["flagged"] is True
+        assert saved["doc2"]["annotations"] == app._store_data()[0]["doc2"]
+
+    def test_page_load_serves_merged_copy(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app._save_delta_to_file({"page": "p", "seq": 1, "docs": {"doc1": {"annotations": self._ann(app, "doc1", "x")}}})
+        assert _layout_store(app, "annotations-store")["doc1"]["overall"] == "x"
+
+    def test_older_delta_from_same_page_is_ignored(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        newer = self._ann(app, "doc1", "newer")
+        older = self._ann(app, "doc1", "older")
+        app._save_delta_to_file({"page": "p", "seq": 2, "docs": {"doc1": {"annotations": newer}}})
+        assert not app._save_delta_to_file({"page": "p", "seq": 1, "docs": {"doc1": {"annotations": older}}})
+        assert self._saved(tmp_path)["doc1"]["annotations"]["overall"] == "newer"
+
+    def test_seq_is_per_document(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        app._save_delta_to_file({"page": "p", "seq": 5, "docs": {"doc1": {"annotations": self._ann(app, "doc1", "a")}}})
+        assert app._save_delta_to_file(
+            {"page": "p", "seq": 3, "docs": {"doc2": {"annotations": self._ann(app, "doc2", "b")}}})
+
+    def test_new_page_restarts_seq(self, tmp_path, docs_file):
+        # A reload starts seq again from 1; its deltas must still apply.
+        app = self._app(tmp_path, docs_file)
+        app._save_delta_to_file({"page": "p1", "seq": 9, "docs": {"doc1": {"annotations": self._ann(app, "doc1", "a")}}})
+        assert app._save_delta_to_file(
+            {"page": "p2", "seq": 1, "docs": {"doc1": {"annotations": self._ann(app, "doc1", "b")}}})
+        assert self._saved(tmp_path)["doc1"]["annotations"]["overall"] == "b"
+
+    @pytest.mark.parametrize("delta", [None, {}, {"page": "p", "seq": 1, "docs": {}}])
+    def test_empty_delta_writes_nothing(self, tmp_path, docs_file, delta):
+        app = self._app(tmp_path, docs_file)
+        assert not app._save_delta_to_file(delta)
+        assert not (tmp_path / "ann.json").exists()
+
+    def test_on_save_only_for_annotation_changes(self, tmp_path, docs_file):
+        app = self._app(tmp_path, docs_file)
+        calls = []
+        app.on_save = lambda doc_id, ann: calls.append((doc_id, ann.overall))
+        meta = app._store_data()[1]["doc2"]
+        app._save_delta_to_file({"page": "p", "seq": 1, "docs": {
+            "doc1": {"annotations": self._ann(app, "doc1", "x")},
+            "doc2": {"metadata": {**meta, "flagged": True}},
+        }})
+        assert calls == [("doc1", "x")]
+
+    def test_hosted_mirror_applies_without_file(self, docs_file):
+        app = TaterApp(schema_model=FlatSchema)
+        app.load_documents(json.loads(open(docs_file).read()))
+        ann = {**app._store_data()[0]["doc1"], "overall": "live"}
+        assert app._apply_save_delta({"page": "p", "seq": 1, "docs": {"doc1": {"annotations": ann}}}) == ["doc1"]
+        assert app.get_annotations()["doc1"]["overall"] == "live"
+
+
 class TestAtomicSave:
     def test_failed_write_keeps_previous_file(self, tmp_path, single_doc_file, monkeypatch):
         ann_path = tmp_path / "ann.json"

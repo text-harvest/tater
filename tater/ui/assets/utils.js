@@ -113,6 +113,64 @@ Object.assign(window.dash_clientside.tater, {
     },
 
     /**
+     * Record annotations-store / metadata-store as loaded, the baseline emitSaveDelta
+     * diffs against. Fires once at page load (its Input, doc-list-store, never changes),
+     * before any server response can change the stores. Output is a sink.
+     */
+    initSaveBaseline: function (_docList, annotationsData, metadataData) {
+        window._taterSave = {
+            ann: annotationsData || {},
+            meta: metadataData || {},
+            sentAnn: {},
+            sentMeta: {},
+            seq: 0,
+            page: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+        };
+        return window.dash_clientside.no_update;
+    },
+
+    /**
+     * Send only the documents that changed to the server (#108, save-delta):
+     * {page, seq, docs: {doc_id: {annotations?, metadata?}}}, with a part only when it
+     * changed. Changed documents are found by object identity: Patch() and the
+     * clientside writers replace only the document they change and keep the others'
+     * objects, so a pass over the keys finds them without serializing the stores. A
+     * document whose object changed but whose JSON matches what was last sent is
+     * skipped. page + seq let the server ignore a delta that arrives after a newer one.
+     */
+    emitSaveDelta: function (annotationsData, metadataData) {
+        var nu = window.dash_clientside.no_update;
+        var st = window._taterSave;
+        if (!st) {
+            window.dash_clientside.tater.initSaveBaseline(null, annotationsData, metadataData);
+            return nu;
+        }
+        var docs = {};
+        var any = false;
+        var diff = function (store, prev, sent, part) {
+            store = store || {};
+            for (var id in store) {
+                if (store[id] === prev[id]) { continue; }
+                var json = JSON.stringify(store[id]);
+                var last = sent[id];
+                if (last === undefined && prev[id] !== undefined) { last = JSON.stringify(prev[id]); }
+                if (json === last) { continue; }
+                sent[id] = json;
+                docs[id] = docs[id] || {};
+                docs[id][part] = store[id];
+                any = true;
+            }
+        };
+        diff(annotationsData, st.ann, st.sentAnn, "annotations");
+        diff(metadataData, st.meta, st.sentMeta, "metadata");
+        st.ann = annotationsData || {};
+        st.meta = metadataData || {};
+        if (!any) { return nu; }
+        st.seq += 1;
+        return { page: st.page, seq: st.seq, docs: docs };
+    },
+
+    /**
      * After an edit, set the current document's status from its visited flag (the
      * clientside twin of update_status_for_doc in callbacks/helpers.py): in_progress
      * once visited, else not_started. Writes nothing when the status is unchanged,

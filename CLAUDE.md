@@ -97,15 +97,23 @@ outputs, execution counts, and kernel metadata on `git add`).
   `document-text-store`. The JS `renderDocumentSpans` fires on that store change (and on
   `span-any-change`) to render annotated text clientside — no server round-trip for rendering.
 - **Persistence**: annotation and metadata state lives in `dcc.Store` components
-  (`annotations-store`, `metadata-store`) in the browser. All mutations are clientside. The
-  `auto_save` server callback fires on store changes and calls `TaterApp._save_stores_to_file()`
-  to persist to disk. `auto_save` is not registered in hosted mode (`annotations_path` is
+  (`annotations-store`, `metadata-store`) in the browser. All mutations are clientside. Saving
+  sends only what changed (#108): the clientside `emitSaveDelta` (`utils.js`) finds the
+  documents whose objects changed since its last call (identity, then JSON against what it last
+  sent) and writes `save-delta` = `{page, seq, docs: {doc_id: {annotations?, metadata?}}}`;
+  `initSaveBaseline` records the stores as loaded. The `auto_save` server callback takes only
+  `save-delta`, and `TaterApp._save_delta_to_file()` merges it into the server copy (ignoring a
+  delta older than one already applied to that document from the same page) and writes the file
+  from that copy. This relies on store writers replacing only the documents they change (a
+  `Patch()`, or `Object.assign({}, store, {[id]: newDoc})` clientside); a writer that rebuilds
+  every document's object still saves correctly but sends every document. `on_save` is called
+  for each document whose annotations were in the delta. `auto_save` is not registered in hosted mode (`annotations_path` is
   `None`); annotations live in the browser and the user downloads them explicitly.
   Format: `{doc_id: {annotations: {...}, metadata: {...}}}`. Saves write a temp file and
   `os.replace` it (`_write_json_atomic`), so a crash never leaves a truncated file.
 - **Server copy of the stores**: `TaterApp._store_data()` returns the current
-  `(annotations, metadata)` dicts. It's built lazily from `annotations` / `metadata` and replaced
-  on every save (`_set_store_data`, called by `_save_stores_to_file`; in hosted mode by the
+  `(annotations, metadata)` dicts. It's built lazily from `annotations` / `metadata` and updated
+  by every save-delta (`_apply_save_delta`, called by `auto_save`; in hosted mode by the
   output-less `mirror_stores` callback). The layout is a function (`_setup_layout`, and
   `serve_layout` in hosted mode) that reads `_store_data()`, so a refresh or a new tab gets the
   latest state. Don't build the stores from `annotations` / `metadata` directly — those hold the

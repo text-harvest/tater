@@ -7,7 +7,7 @@ import flask
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from dash import Input, Output, State, ALL, ctx, no_update, html, ClientsideFunction
+from dash import Input, Output, State, ALL, ctx, no_update, html, ClientsideFunction, Patch
 
 import dash_mantine_components as dmc
 
@@ -414,16 +414,33 @@ def setup_callbacks(tater_app: TaterApp) -> None:
 
     is_hosted = tater_app.is_hosted
 
+    # Save deltas (#108): emitSaveDelta sends only the documents that changed, so
+    # saving never uploads the whole stores. initSaveBaseline records the stores as
+    # loaded, before anything changes them, for emitSaveDelta to diff against.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="initSaveBaseline"),
+        Output("save-baseline-sink", "data"),
+        Input("doc-list-store", "data"),
+        State("annotations-store", "data"),
+        State("metadata-store", "data"),
+    )
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="emitSaveDelta"),
+        Output("save-delta", "data"),
+        Input("annotations-store", "data"),
+        Input("metadata-store", "data"),
+        prevent_initial_call=True,
+    )
+
     if is_hosted:
         # No auto-save in hosted mode, but keep the session's copy of the stores
         # current so a page refresh doesn't fall back to the uploaded state.
         @app.callback(
-            Input("annotations-store", "data"),
-            Input("metadata-store", "data"),
+            Input("save-delta", "data"),
             prevent_initial_call=True,
         )
-        def mirror_stores(annotations_data, metadata_data):
-            _ta()._set_store_data(annotations_data or {}, metadata_data or {})
+        def mirror_stores(delta):
+            _ta()._apply_save_delta(delta)
 
         # Download annotations as JSON
         @app.callback(
@@ -472,23 +489,19 @@ def setup_callbacks(tater_app: TaterApp) -> None:
             return "/"
 
     if not is_hosted:
-        # Auto-save: write to file whenever annotations or metadata store changes.
-        # Not registered in hosted mode — no annotations_path, no file to write.
+        # Auto-save: merge the changed documents into the server copy and write the
+        # file from it. Not registered in hosted mode — no annotations_path.
         @app.callback(
             Output("timing-store", "data", allow_duplicate=True),
-            Input("annotations-store", "data"),
-            Input("metadata-store", "data"),
-            State("current-doc-id", "data"),
-            State("timing-store", "data"),
+            Input("save-delta", "data"),
             prevent_initial_call=True,
         )
-        def auto_save(annotations_data, metadata_data, doc_id, timing_data):
-            ta = _ta()
-            ta._save_stores_to_file(annotations_data or {}, metadata_data or {}, doc_id=doc_id)
-            now = time.time()
-            timing_data = dict(timing_data or {})
-            timing_data["last_save_time"] = now
-            return timing_data
+        def auto_save(delta):
+            if not _ta()._save_delta_to_file(delta):
+                return no_update
+            patch = Patch()
+            patch["last_save_time"] = time.time()
+            return patch
 
 
 def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:

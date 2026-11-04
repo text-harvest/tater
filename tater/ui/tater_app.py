@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import tempfile
+import threading
 
 from tater.models.document import DocumentMetadata
 
@@ -117,6 +118,11 @@ class TaterApp:
         # load serves the latest state rather than what was loaded at startup.
         self._ann_data: dict[str, dict] | None = None
         self._meta_data: dict[str, dict] | None = None
+        # Last save-delta applied per document, as (page, seq), so a delta that arrives
+        # after a newer one from the same page is ignored. The lock serializes merging
+        # and writing: Dash may run two auto_save requests at once.
+        self._delta_seq: dict[str, tuple[str, int]] = {}
+        self._save_lock = threading.Lock()
 
     def load_documents(self, source) -> bool:
         """Load documents from a file path, a list of dicts, or a DataFrame.
@@ -342,6 +348,46 @@ class TaterApp:
         except Exception as e:
             print(f"Error applying annotations: {e}")
 
+    def _apply_save_delta(self, delta: dict | None) -> list[str]:
+        """Merge a ``save-delta`` into the server copy of the stores.
+
+        ``delta`` is ``{"page", "seq", "docs": {doc_id: {"annotations"?, "metadata"?}}}``
+        from the clientside ``emitSaveDelta``; each part replaces that document's entry.
+        A document is skipped when a delta with the same ``page`` and an equal or higher
+        ``seq`` was already applied to it (requests can arrive out of order). Returns
+        the ids of the documents applied, in delta order.
+        """
+        if not delta or not delta.get("docs"):
+            return []
+        page, seq = delta.get("page"), delta.get("seq") or 0
+        applied = []
+        with self._save_lock:
+            ann_data, meta_data = self._store_data()
+            for doc_id, entry in delta["docs"].items():
+                last = self._delta_seq.get(doc_id)
+                if last is not None and last[0] == page and last[1] >= seq:
+                    continue
+                self._delta_seq[doc_id] = (page, seq)
+                if entry.get("annotations") is not None:
+                    ann_data[doc_id] = entry["annotations"]
+                if entry.get("metadata") is not None:
+                    meta_data[doc_id] = entry["metadata"]
+                applied.append(doc_id)
+        return applied
+
+    def _save_delta_to_file(self, delta: dict | None) -> bool:
+        """Apply a ``save-delta`` and write the annotations file from the server copy.
+
+        Calls ``on_save`` for each applied document whose annotations were in the
+        delta. Returns True when something was written.
+        """
+        applied = self._apply_save_delta(delta)
+        if not applied:
+            return False
+        docs = delta["docs"]
+        self._write_store_data([d for d in applied if docs[d].get("annotations") is not None])
+        return True
+
     def _save_stores_to_file(
         self,
         annotations_data: dict,
@@ -350,6 +396,9 @@ class TaterApp:
     ) -> None:
         """Save annotations and metadata from dcc.Store dicts to the annotations file.
 
+        Replaces the server copy with these stores. The app itself saves deltas
+        (``_save_delta_to_file``); this is for whole-store saves.
+
         Args:
             annotations_data: {doc_id: annotation_dict} from annotations-store
             metadata_data: {doc_id: metadata_dict} from metadata-store
@@ -357,31 +406,37 @@ class TaterApp:
                 and an ``on_save`` hook is configured, the hook is called after writing.
         """
         self._set_store_data(annotations_data or {}, metadata_data or {})
+        self._write_store_data([doc_id] if doc_id else [])
+
+    def _write_store_data(self, hook_doc_ids: list[str]) -> None:
+        """Write the server copy of the stores to the annotations file, then call
+        ``on_save`` for each of ``hook_doc_ids`` that has annotations."""
         try:
-            path = Path(self.annotations_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
+            with self._save_lock:
+                annotations_data, metadata_data = self._store_data()
+                path = Path(self.annotations_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
 
-            save_dict = {}
-            all_doc_ids = set(annotations_data or {}) | set(metadata_data or {})
-            for d_id in all_doc_ids:
-                save_dict[d_id] = {
-                    "annotations": (annotations_data or {}).get(d_id, {}),
-                    "metadata": (metadata_data or {}).get(d_id, {}),
-                }
-
-            _write_json_atomic(path, save_dict)
-            self._save_error = None
-
-            if self.on_save and doc_id and (annotations_data or {}).get(doc_id) is not None:
-                try:
-                    if self.schema_model:
-                        ann_obj = self.schema_model(**(annotations_data[doc_id]))
-                        self.on_save(doc_id, ann_obj)
-                except Exception as hook_err:
-                    print(f"on_save hook error: {hook_err}")
+                save_dict = {}
+                for d_id in set(annotations_data) | set(metadata_data):
+                    save_dict[d_id] = {
+                        "annotations": annotations_data.get(d_id, {}),
+                        "metadata": metadata_data.get(d_id, {}),
+                    }
+                _write_json_atomic(path, save_dict)
+                self._save_error = None
+                hook_anns = {d: annotations_data[d] for d in hook_doc_ids if annotations_data.get(d) is not None}
         except Exception as e:
             self._save_error = str(e)
             print(f"Error saving annotations: {e}")
+            return
+
+        if self.on_save and self.schema_model:
+            for d_id, ann in hook_anns.items():
+                try:
+                    self.on_save(d_id, self.schema_model(**ann))
+                except Exception as hook_err:
+                    print(f"on_save hook error: {hook_err}")
 
     def _save_annotations_to_file(self, doc_id: Optional[str] = None) -> None:
         """Save all annotations to the annotations file.

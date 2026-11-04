@@ -179,6 +179,8 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
             dcc.Store(id="doc-select-nav", data=None),
             dcc.Store(id="nav-clicks-applied", data={"prev": 0, "next": 0}),  # see navigate_buttons
+            dcc.Store(id="save-delta", data=None),  # changed documents only; see emitSaveDelta
+            dcc.Store(id="save-baseline-sink", data=None),  # dummy output of initSaveBaseline
             dcc.Store(id="doc-select-state-sink", data=None),  # dummy output of updateDocSelectState
             doc_list_store,
             *span_stores,

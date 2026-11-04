@@ -224,7 +224,47 @@ The summary lists, for each action:
 3. Drop anything under 100 ms at 10k.
 4. Update the Phase 2 order below to match, in this file.
 
-## Phase 2 — Fixes (provisional order)
+### Results (2026-11-03)
+
+`perf/results/baseline.md`, from `python -m perf.run --sizes 500,10000 --schema checkbox,realistic --filled both --spans 2`. Two departures from step 1: sizes 500 and 10,000 only, with short documents and 2 spans per filled document. That's what fits in the 8 GB WSL VM; the medium and long lengths are unmeasured.
+
+Ranked by settle time at 10k (`realistic`, filled) × frequency weight:
+
+| action | settle at 10k | weight | score | upload at 10k | 10k / 500 settle |
+|---|---:|---:|---:|---:|---:|
+| type 20 characters, text area | 10.4 s | ×1000 | 10,394 | 173 MB | 9.5× |
+| type 20 characters, notes | 5.3 s | ×1000 | 5,337 | 42 MB | 4.9× |
+| Next | 4.0 s | ×1000 | 3,971 | 33 MB | 10.5× |
+| tick | 0.65 s | ×1000 | 646 | 8.7 MB | 8.6× |
+| selector jump (per jump) | 5.1 s | ×100 | 508 | 33 MB | 11.6× |
+| flag + Next (per step) | 3.9 s | ×100 | 393 | 39 MB | 9.6× |
+| reload journey | 9.8 s | ×10 | 98 | 67 MB | 3.9× |
+| add span | 0.59 s | ×100 | 59 | 8.7 MB | 6.1× |
+| page load | 2.8 s | ×1 | 2.8 | 17 MB | 6.4× |
+| startup (server) | 0.30 s | ×1 | 0.3 | — | 18× |
+| selector search | 77 ms | — | dropped (<100 ms) | 0 | 1.0× |
+
+What the trace shows:
+
+- **Full-store uploads are the dominant cost.** Every server callback with `annotations-store` or `metadata-store` as an input uploads all of it: 4.3 MB per call at 10k realistic, 1.3 MB for checkbox. Upload per action grows 20× from 500 to 10k in every action that calls the server.
+  - **Every edit** (a keystroke, tick or span) sends two: `update_status_from_annotations` (2.3) and `auto_save` (2.4).
+  - **Next** sends about eight: navigation, `on_doc_change`, flag/notes load, repeater, HL load and relay, status, and `auto_save`. Navigation also returns the whole `metadata-store` (1 MB down).
+- **Long tasks are the other half.** Next spends 2–3 s, and a selector jump 4 s, blocking the browser main thread at 10k, and they aren't yet attributed. Large request bodies are serialized and responses parsed on the main thread, so part should go with 2.3; check after.
+- **Saving is above threshold.** `_save_stores_to_file` takes 266 ms at 10k realistic, writing 7.9 MB, and runs on every edit.
+- **Server startup and memory are fine.** Startup takes 0.3 s and RSS is 201 MB at 10k. In hosted mode each extra session costs 47 MB at 10k realistic (about 1 GB for 20).
+- **`rapid_clicks` dropped clicks once** at 500 docs (realistic, empty): 118 requests and no settle within 30 s, where 3 reruns took 3.2 s. It passed in every 10k scenario. This is a possible race in the navigation callbacks, separate from performance. Track it as its own issue.
+
+## Phase 2 — Fixes
+
+Order from the Phase 1 baseline (section numbers are kept, since sections refer to each other):
+
+1. **2.1** — done.
+2. **2.3 Current-document slice.** It removes most of the uploads behind every top-ranked action: all of Next's and selector jumps', and half of each edit's.
+3. **2.4 Save deltas.** It removes the other half of each edit's uploads (`auto_save`).
+4. **2.5 Debounce.** This is no longer conditional: the save measured 266 ms at 10k, on every edit.
+5. **Re-measure, then attribute long tasks** on Next and selector jumps. Profile what remains and fix from the 2.2 list, e.g. the progress badge.
+6. **2.2** — the selector limit and finish actions are dropped (selector search measured 77 ms; finish is rare); "fewer saves" is covered by 2.4.
+7. **2.6, 2.7** stay conditional. 2.6 needs a run with medium and long lengths. Page load (2.8 s, ×1) ranks last.
 
 ### 2.1 Server mirror, per-request layout, atomic saves — do first
 
@@ -239,10 +279,10 @@ These fix the refresh bug above and are the base that 2.4 builds on, so they com
 
 ### 2.2 Cheap fixes
 
-- **Selector limit.** Set `limit=200` on `document-select` (`layout.py`). Mantine passes `limit` to a custom `filter`, so `docFilter` (`assets/utils.js`) must slice its result to `limit`. Keep the exact-position match first.
-- **Fewer saves.** Use the trace to confirm `auto_save` fires twice per tick. After 2.4 this mostly goes away. If not, skip the write when the serialized delta equals the last one written for that doc.
+- **Selector limit — dropped** (selector search measured 77 ms at 10k). Set `limit=200` on `document-select` (`layout.py`). Mantine passes `limit` to a custom `filter`, so `docFilter` (`assets/utils.js`) must slice its result to `limit`. Keep the exact-position match first.
+- **Fewer saves — covered by 2.4.** Use the trace to confirm `auto_save` fires twice per tick. After 2.4 this mostly goes away. If not, skip the write when the serialized delta equals the last one written for that doc.
 - **Progress badge.** If `updateStatusBadges` shows up in long tasks at 10k, keep running counts in `window._taterStatusCounts`, adjusted by the per-doc status change instead of a full recount.
-- **Finish actions.** `handle_finish` / `go_to_first_incomplete` scans are expected to be dropped (rare actions). Keep them only if they measure above threshold.
+- **Finish actions — dropped** (rare; not measured). `handle_finish` / `go_to_first_incomplete` scans are expected to be dropped (rare actions). Keep them only if they measure above threshold.
 
 ### 2.3 Current-document slice
 
@@ -285,9 +325,9 @@ A new store `save-delta` carries only what changed:
 - **Hosted mode.** `mirror_stores` from 2.1 also switches to `save-delta`, and still doesn't write a file.
 - **Ordering.** Dash may run two `auto_save` requests concurrently. Ignore a delta whose `seq` is ≤ the last applied one for each doc. Keep `seq` per doc in the mirror.
 
-### 2.5 Conditional: cheaper persistence
+### 2.5 Cheaper persistence
 
-Only do this if, after 2.4, saving at 10k (realistic, filled) is above threshold.
+The baseline measured `_save_stores_to_file` at 266 ms at 10k (realistic, filled), on every edit; 2.4 doesn't change that, since the file is still written whole.
 
 - **First option: debounce.** Write at most once per 2 s from the mirror, and flush on shutdown with `atexit`. The annotations file format doesn't change.
 - **Only if debouncing isn't enough:** an SQLite sidecar holding one row per document, with the JSON file exported on demand and at shutdown. This changes what users see on disk, so it needs agreement first.

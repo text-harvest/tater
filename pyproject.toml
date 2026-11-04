@@ -29,6 +29,10 @@ packages = ["tater"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repo root, so tests can build projects with perf.synthetic.
+pythonpath = ["."]
+markers = ["perf: slow scale tests (10,000 documents); run with -m perf"]
+addopts = "-m 'not perf'"
 
 [dependency-groups]
 dev = [

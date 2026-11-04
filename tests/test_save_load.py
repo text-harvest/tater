@@ -653,3 +653,45 @@ class TestAtomicSave:
         ann_path.chmod(0o640)
         app._save_annotations_to_file()
         assert ann_path.stat().st_mode & 0o777 == 0o640
+
+
+class TestSaveAtScale:
+    """Save-time ceilings at 10,000 filled documents (#108). Budgets are ~10x the
+    measured times, to catch a change in kind (e.g. a merge that copies every
+    document), not machine noise."""
+
+    @pytest.fixture(scope="class")
+    def big_app(self, tmp_path_factory):
+        from perf.synthetic import make_project, write_project
+        from tater.loaders import widgets_from_model
+        from tater.loaders.json_loader import parse_schema
+
+        tmp = tmp_path_factory.mktemp("scale")
+        project = make_project(10_000, 200, True, spans_per_doc=0, schema="checkbox")
+        write_project(project, tmp)
+        model, widgets = parse_schema(project.schema)
+        app = TaterApp(schema_model=model, annotations_path=str(tmp / "annotations.json"), save_interval=0)
+        app.load_documents(str(tmp / "documents.json"))
+        app.set_annotation_widgets(widgets_from_model(model, overrides=widgets))
+        return app
+
+    def test_whole_file_write(self, big_app):
+        # Measured ~0.1 s; runs at most once per save_interval.
+        import time
+        big_app._store_data()
+        start = time.perf_counter()
+        assert big_app._write_store_data([])
+        assert time.perf_counter() - start < 1.5
+
+    def test_merging_one_document_does_not_grow_with_n(self, big_app):
+        # Runs on every edit; measured well under 1 ms.
+        import time
+        ann, meta = big_app._store_data()
+        doc_id = next(iter(ann))
+        times = []
+        for seq in range(1, 21):
+            delta = {"page": "scale", "seq": seq, "docs": {doc_id: {"annotations": dict(ann[doc_id])}}}
+            start = time.perf_counter()
+            assert big_app._apply_save_delta(delta) == [doc_id]
+            times.append(time.perf_counter() - start)
+        assert sorted(times)[len(times) // 2] < 0.005

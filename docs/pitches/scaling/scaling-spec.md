@@ -370,6 +370,8 @@ If the initial payload at 10k (realistic, filled) is above threshold, don't fill
 
 ## Phase 3 — Regression guards
 
+**Built.** Bounds are about 3× the post-2.5 values, which are the same at 500 and 10,000 documents: Next ≤ 20 KB and tick ≤ 10 KB, each way (measured 6 / 2 KB and 1 / 0.3 KB, checkbox). The fetch wrapper also records the response's `Content-Length` for the download bound. The 10k class subclasses the 2,500 one with `N = 10_000`. The save ceilings are in `TestSaveAtScale` (`test_save_load.py`): the whole-file write under 1.5 s (measured 0.13 s) and the median one-document delta merge under 5 ms, which runs on every edit. `pythonpath = ["."]` in the pytest config lets tests import `perf.synthetic`.
+
 - **Byte bounds in `TestLargeDocumentSet`** (`tests/test_browser.py`). The existing `fetch` wrapper also records `arguments[1].body.length`. Assert the upload per Next and per tick against bounds set from the post-2.4 numbers, roughly 20 KB per Next and 10 KB per tick at 2,500. Keep the request-count bounds.
 - **A 10k variant** of the same class, marked `@pytest.mark.perf`. Register the marker in `pyproject.toml`, and exclude it by default with `addopts = "-m 'not perf'"`.
 - **A save-time ceiling** in a fast unit test using `perf.synthetic`: 10k checkbox docs, filled, save under a fixed budget.

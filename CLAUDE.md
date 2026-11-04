@@ -372,8 +372,12 @@ as the progress bar. Check new callbacks against these rules:
 - **Return `no_update` when nothing changed.** A write that repeats the current value still
   fires every dependent callback, and for the stores it also triggers an auto-save.
 
-`TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests per action at
-2,500 documents. Keep it passing.
+`TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests and bytes up/down
+per Next click and per checkbox tick at 2,500 documents (Next ≤ 20 KB, tick ≤ 10 KB each way;
+measured values are the same at 500 and 10,000). `TestLargeDocumentSet10k` runs the same
+bounds at 10,000 and is marked `perf`, excluded by default (`-m perf` to run it).
+`TestSaveAtScale` in `test_save_load.py` puts ceilings on the whole-file write and the
+per-edit delta merge at 10,000 documents. Keep them passing.
 
 To measure a change, run the harness in `perf/` (needs `uv run playwright install chromium` once):
 
@@ -486,7 +490,11 @@ reverts it; change dependencies with `uv add` / `uv add --dev`. Run with:
 uv run pytest tests/ --ignore=tests/test_browser.py   # fast, no browser
 uv run pytest tests/test_browser.py --headless         # browser tests
 uv run pytest tests/ --headless                        # full suite
+uv run pytest tests/test_browser.py --headless -m perf  # 10,000-document browser checks
 ```
+
+`pyproject.toml` sets `addopts = "-m 'not perf'"` and `pythonpath = ["."]` (so tests can
+import `perf.synthetic`).
 
 **Test files:**
 - `test_value_helpers.py` — `get_model_value` / `set_model_value` and dict variants
@@ -499,7 +507,7 @@ uv run pytest tests/ --headless                        # full suite
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
-- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
+- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant
 
 **Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` uses a ChromeDriver from `webdriver-manager`'s cache (`~/.wdm`) that matches the installed Chrome, found offline by `_cached_chromedriver`. It only calls `ChromeDriverManager().install()`, which always goes to the network, when no match is cached, e.g. on first run or after a Chrome update.
 

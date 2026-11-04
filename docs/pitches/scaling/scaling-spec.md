@@ -252,7 +252,7 @@ What the trace shows:
 - **Long tasks are the other half.** Next spends 2–3 s, and a selector jump 4 s, blocking the browser main thread at 10k, and they aren't yet attributed. Large request bodies are serialized and responses parsed on the main thread, so part should go with 2.3; check after.
 - **Saving is above threshold.** `_save_stores_to_file` takes 266 ms at 10k realistic, writing 7.9 MB, and runs on every edit.
 - **Server startup and memory are fine.** Startup takes 0.3 s and RSS is 201 MB at 10k. In hosted mode each extra session costs 47 MB at 10k realistic (about 1 GB for 20).
-- **`rapid_clicks` dropped clicks once** at 500 docs (realistic, empty): 118 requests and no settle within 30 s, where 3 reruns took 3.2 s. It passed in every 10k scenario. This is a possible race in the navigation callbacks, separate from performance. Track it as its own issue.
+- **`rapid_clicks` dropped clicks once** at 500 docs (realistic, empty): 118 requests and no settle within 30 s, where 3 reruns took 3.2 s. It passed in every 10k scenario. It was a race in `navigate_buttons`, fixed with 2.3 (see there).
 
 ## Phase 2 — Fixes
 
@@ -263,7 +263,7 @@ Order from the Phase 1 baseline (section numbers are kept, since sections refer 
 3. **2.4 Save deltas.** It removes the other half of each edit's uploads (`auto_save`).
 4. **2.5 Debounce.** This is no longer conditional: the save measured 266 ms at 10k, on every edit.
 5. **Re-measure, then attribute long tasks** on Next and selector jumps. Profile what remains and fix from the 2.2 list, e.g. the progress badge.
-6. **2.2** — the selector limit and finish actions are dropped (selector search measured 77 ms; finish is rare); "fewer saves" is covered by 2.4.
+6. **2.2** — the selector limit was done with 2.3 (it was most of Next's long tasks); finish actions are dropped (rare); "fewer saves" is covered by 2.4.
 7. **2.6, 2.7** stay conditional. 2.6 needs a run with medium and long lengths. Page load (2.8 s, ×1) ranks last.
 
 ### 2.1 Server mirror, per-request layout, atomic saves — do first
@@ -279,12 +279,24 @@ These fix the refresh bug above and are the base that 2.4 builds on, so they com
 
 ### 2.2 Cheap fixes
 
-- **Selector limit — dropped** (selector search measured 77 ms at 10k). Set `limit=200` on `document-select` (`layout.py`). Mantine passes `limit` to a custom `filter`, so `docFilter` (`assets/utils.js`) must slice its result to `limit`. Keep the exact-position match first.
+- **Selector limit — done with 2.3.** Dropped at first because selector search measured 77 ms, but profiling Next at 10k showed the closed `document-select` re-rendering all 10,000 options on every navigation: about 1 s of Mantine/React work per Next, most of its long tasks. Set `limit=200` on `document-select` (`layout.py`). Mantine passes `limit` to a custom `filter`, so `docFilter` (`assets/utils.js`) must slice its result to `limit`. Keep the exact-position match first.
 - **Fewer saves — covered by 2.4.** Use the trace to confirm `auto_save` fires twice per tick. After 2.4 this mostly goes away. If not, skip the write when the serialized delta equals the last one written for that doc.
 - **Progress badge.** If `updateStatusBadges` shows up in long tasks at 10k, keep running counts in `window._taterStatusCounts`, adjusted by the per-doc status change instead of a full recount.
 - **Finish actions — dropped** (rare; not measured). `handle_finish` / `go_to_first_incomplete` scans are expected to be dropped (rare actions). Keep them only if they measure above threshold.
 
 ### 2.3 Current-document slice
+
+**Built.** Differences from the plan below:
+
+- **Two slice stores, not one.** Dash waits for pending callbacks that will change a callback's `Input`s, but reads `State` as it is (`getReadyCallbacks` in dash-renderer). So `State("current-doc-slice")` in a callback triggered by `current-doc-id` would get the departing document. `buildDocSlices` writes `current-doc-slice` (every change; `State` for callbacks a user action triggers) and `doc-load-slice` (only on navigation, or `"reload": true` after a repeater delete; the `Input` for `on_doc_change`, `load_flag_and_notes`, and the repeater and HL loads). Both are filled in the layout, so nothing extra fires on page load.
+- **Shells, not new impls.** `_slice_stores` turns a slice into one-document stores (`{doc_id: ...}`), so the `*_impl` functions and widget renderers are unchanged; `_meta_patch` / `_dict_patch` write back only changed fields. A slice for another document returns None and nothing is written, rather than overwriting that document with defaults.
+- **`update_status_from_annotations` is clientside** (`updateStatusFromAnnotations`). It only sets a visited document back to `in_progress`, so it needs no server.
+- **Finish and go-to-first-incomplete keep the full `metadata-store`** as `State` (rare; they need every status) but write Patches. `status-counts-store` was not added.
+- **`on_doc_change` starts the clock only if nothing has**, so navigation's restart isn't moved; `_nav_init` is gone.
+- **Selector limit** from 2.2 done here (see 2.2).
+- **Click race fixed.** `navigate_buttons` stepped +1 from `State("current-doc-id")`, so a click sent before the previous response arrived was lost (the baseline's one `rapid_clicks` failure; once navigation got fast it failed at 10k too). It now steps by the clicks not yet applied, from `nav-clicks-applied`.
+
+Planned design:
 
 A new clientside store holds only the current document's data:
 

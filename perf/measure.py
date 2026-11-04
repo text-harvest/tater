@@ -22,8 +22,13 @@ from perf.trace_report import flags_for, read_trace
 # an action uploads tens of MB, which ran the runner and its driver out of memory.
 INIT_SCRIPT = """
 window.__taterLongTaskMs = 0;
+window.__taterLongTaskEnd = 0;  // Date.now() at the end of the last long task
 new PerformanceObserver(list => {
-    for (const e of list.getEntries()) { window.__taterLongTaskMs += e.duration; }
+    for (const e of list.getEntries()) {
+        window.__taterLongTaskMs += e.duration;
+        window.__taterLongTaskEnd = Math.max(window.__taterLongTaskEnd,
+            performance.timeOrigin + e.startTime + e.duration);
+    }
 }).observe({type: 'longtask', buffered: true});
 
 (() => {
@@ -101,10 +106,13 @@ class ActionRecorder:
 
     def _dash(self) -> dict:
         """The page's Dash request counters (see INIT_SCRIPT) and its title."""
-        return self.page.evaluate("({...window.__taterDash, title: document.title})")
+        return self.page.evaluate(
+            "({...window.__taterDash, longTaskEnd: window.__taterLongTaskEnd, title: document.title})")
 
     def wait_quiet(self, quiet: float = QUIET_S, timeout: float = SETTLE_TIMEOUT_S) -> None:
-        """Wait until no Dash request has been in flight for ``quiet`` seconds."""
+        """Wait until no Dash request has been in flight, and no long task has run, for
+        ``quiet`` seconds. A page busy with clientside work has no request in flight, so
+        requests alone would call it quiet while queued callbacks are still running."""
         deadline = time.perf_counter() + timeout
         while time.perf_counter() < deadline:
             self.page.wait_for_timeout(50)
@@ -112,8 +120,8 @@ class ActionRecorder:
                 d = self._dash()
             except Error:  # the page is navigating (a reload); its counters come back after
                 continue
-            if (not d["inFlight"] and time.time() - d["lastDone"] / 1000 >= quiet
-                    and d["title"] != "Updating..."):
+            last = max(d["lastDone"], d["longTaskEnd"]) / 1000
+            if not d["inFlight"] and time.time() - last >= quiet and d["title"] != "Updating...":
                 return
         raise TimeoutError(f"page still busy after {timeout:.0f} s")
 

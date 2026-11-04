@@ -8,7 +8,7 @@ from dash import Input, Output, State, ALL, MATCH, ctx, no_update, ClientsideFun
 from dash.exceptions import PreventUpdate
 
 from tater.ui import value_helpers
-from tater.ui.callbacks.helpers import _get_ann
+from tater.ui.callbacks.helpers import _get_ann, _slice_stores
 from tater.widgets.base import ContainerWidget, ControlWidget
 from tater.widgets.repeater import (
     RepeaterWidget,
@@ -98,13 +98,13 @@ def setup_repeater_callbacks(tater_app: TaterApp) -> None:
          Output({"type": "repeater-ann-relay", "field": MATCH}, "data")],
         [Input({"type": "repeater-add",    "field": MATCH}, "n_clicks"),
          Input({"type": "repeater-delete", "field": MATCH, "index": ALL}, "n_clicks"),
-         Input("current-doc-id", "data")],
+         Input("doc-load-slice", "data")],
         [State({"type": "repeater-store",  "field": MATCH}, "data"),
          State({"type": "repeater-change", "field": MATCH}, "data"),
-         State("annotations-store", "data")],
+         State("current-doc-slice", "data")],
         prevent_initial_call="initial_duplicate",
     )
-    def update_repeater(add_clicks, delete_clicks, doc_id, store_data, change_count, annotations_data):
+    def update_repeater(add_clicks, delete_clicks, load_slice, store_data, change_count, doc_slice):
         pipe_field = ctx.outputs_list[0]["id"]["field"]
         field_path = pipe_field.replace("|", ".")
 
@@ -118,7 +118,11 @@ def setup_repeater_callbacks(tater_app: TaterApp) -> None:
         widget._finalize_paths(parent_path=parts[0] if len(parts) > 1 else "")
 
         # Doc navigation / initial load: reload indices from annotation.
-        if not ctx.triggered_id or ctx.triggered_id == "current-doc-id":
+        if not ctx.triggered_id or ctx.triggered_id == "doc-load-slice":
+            if (load_slice or {}).get("reload"):
+                raise PreventUpdate  # a repeater delete; loadValues refreshes the values
+            doc_id = (load_slice or {}).get("doc_id")
+            annotations_data, _ = _slice_stores(load_slice)
             indices = []
             if doc_id:
                 ann = _get_ann(annotations_data, doc_id)
@@ -131,6 +135,10 @@ def setup_repeater_callbacks(tater_app: TaterApp) -> None:
 
         if not ctx.triggered or not ctx.triggered[0].get("value"):
             raise PreventUpdate
+
+        # Add / delete: the current document, from the slice.
+        doc_id = (doc_slice or {}).get("doc_id")
+        annotations_data, _ = _slice_stores(doc_slice)
 
         if store_data is None:
             store_data = {"indices": [], "next_index": 0}
@@ -230,11 +238,13 @@ def setup_nested_repeater_callbacks(tater_app: TaterApp) -> None:
         [
             State({"type": _NESTED_STORE_TYPE, "ld": MATCH, "li": MATCH}, "data"),
             State("current-doc-id", "data"),
-            State("annotations-store", "data"),
+            State("current-doc-slice", "data"),
         ],
         prevent_initial_call=True,
     )
-    def _update_nested_items(add_clicks, delete_clicks, store_data, doc_id, annotations_data):
+    def _update_nested_items(add_clicks, delete_clicks, store_data, doc_id, doc_slice):
+        stores = _slice_stores(doc_slice, doc_id)
+        annotations_data = stores[0] if stores else {}
         ld = ctx.outputs_list[0]["id"]["ld"]
         outer_li = ctx.outputs_list[0]["id"]["li"]
 

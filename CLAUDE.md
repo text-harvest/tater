@@ -114,9 +114,29 @@ outputs, execution counts, and kernel metadata on `git add`).
   sets, so a refresh reopens the last document (in memory only; a restart opens the first).
 - **value_helpers**: `get_model_value` / `set_model_value` in `tater/ui/value_helpers.py`
   handle dot-path reads/writes into nested Pydantic model instances.
-- **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `current-doc-id`
-  change and populates both `flag-document` (checked) and `document-notes` (value) from
-  `metadata-store`. This is the only callback that writes to these outputs on navigation,
+- **Current-document slice** (#108): server callbacks never take `annotations-store` /
+  `metadata-store` as input (except `auto_save`, hosted `mirror_stores` / download, and the
+  rare Finish / go-to-first-incomplete). Instead the clientside `buildDocSlices` (`utils.js`)
+  keeps two stores of `{doc_id, annotations, metadata}` for the current document:
+  `current-doc-slice` follows every change and is read as `State` by callbacks a user action
+  triggers (flag, notes, pause, save, HL changes, repeater add/delete, navigation's departing
+  doc); `doc-load-slice` changes only on navigation, or with `"reload": true` after a repeater
+  delete, and is the `Input` for callbacks that set up the arriving document (`on_doc_change`,
+  `load_flag_and_notes`, repeater and HL loads). The layout fills both for the first document.
+  Server shells turn a slice into one-document stores with `_slice_stores` (`helpers.py`), so
+  the `*_impl` functions and widget renderers keep reading `store.get(doc_id)`, and write back
+  with `_meta_patch` / `_dict_patch` (only changed fields). `_slice_stores(slice, doc_id)`
+  returns None when the slice is for another document; don't write metadata then, or the
+  document's metadata is replaced by defaults.
+- **Navigation**: `_perform_navigation` handles only the departing document (time, visited,
+  complete / in_progress) and restarts the clock; `on_doc_change` handles the arriving one
+  (visited, in-flight status, `annotation_seconds_at_load`). Edits set a visited document back
+  to `in_progress` clientside (`updateStatusFromAnnotations`).
+  Prev/Next step by the clicks not yet applied (`nav-clicks-applied`), not by one, so clicks
+  whose requests overlap aren't lost (`_button_step`).
+- **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `doc-load-slice`
+  (navigation) and populates both `flag-document` (checked) and `document-notes` (value) from
+  the arriving document's metadata. This is the only callback that writes to these outputs on navigation,
   and it returns `no_update` for a control that already shows the right value. Setting a
   control re-fires `save_flag` / `save_notes`, so those also return `no_update` when the value
   equals what is already stored — otherwise every navigation would write `metadata-store`
@@ -129,6 +149,8 @@ outputs, execution counts, and kernel metadata on `git add`).
   `docRenderOption` (in `assets/utils.js`) read it when the dropdown renders to filter, draw
   the status badge/flag, and search (exact position first, then name/id/info substring). A
   user pick goes through `docSelectChanged` → `doc-select-nav` store → server `navigate_select`.
+  The Select has `limit=200` (`docFilter` slices to it): without it the closed Select
+  re-rendered all options on every navigation, ~1 s per Next at 10k.
   Don't make the option list depend on metadata again — re-sending 2,500 options to the Select
   cost ~120 ms per Next — and don't reintroduce per-document components with pattern-matching
   IDs: at ~2,500 docs they froze the UI for seconds per action (#107).
@@ -242,6 +264,12 @@ this version:
 
 ## Dash callback gotchas
 
+**Dash waits for pending Inputs, not State**: before running a callback, the renderer waits
+for other callbacks that will change its `Input`s (`getReadyCallbacks`), but reads `State` as it
+is at that moment. So a callback triggered by `current-doc-id` that reads a store derived from
+`current-doc-id` as `State` gets the old value. Take the derived store as the `Input` instead
+(that's why `doc-load-slice` exists alongside `current-doc-slice`).
+
 **Pattern-matching phantom fires**: when a callback uses `Input({...}, ALL)` pattern matching,
 Dash re-fires the callback when matching components are re-rendered (e.g. after another callback
 updates the component tree). Guard against this by checking that the triggered value is non-zero:
@@ -323,8 +351,8 @@ as the progress bar. Check new callbacks against these rules:
 - **No full stores as server callback inputs.** Dash sends a store's whole value with every
   request that lists it as `Input` or `State`. `annotations-store` and `metadata-store` hold
   every document, so each such callback ships them in full. Prefer clientside callbacks, or
-  pass only the current document's data. Return `Patch()` instead of a rebuilt dict when
-  changing one document.
+  use `current-doc-slice` / `doc-load-slice` (see Architecture). Return `Patch()` instead of a
+  rebuilt dict when changing one document (`_meta_patch`).
 - **No catch-all triggers.** Don't trigger on a whole store or an `ALL` pattern when only one
   field or document matters. Every extra trigger is another round trip, and chains of them run
   one after another.

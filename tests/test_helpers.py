@@ -5,6 +5,7 @@ import time
 import types
 
 import pytest
+from dash import no_update
 
 from tater.ui.callbacks.helpers import (
     _build_ev_lookup,
@@ -14,7 +15,10 @@ from tater.ui.callbacks.helpers import (
     _doc_index,
     _get_ann,
     _get_meta,
+    _dict_patch,
+    _meta_patch,
     _perform_navigation,
+    _slice_stores,
     _status_display,
 )
 from tater.models.document import Document
@@ -303,15 +307,20 @@ class TestPerformNavigation:
         doc_id, _, _, _ = _perform_navigation(ta, None, 1, None, None, None)
         assert doc_id == "doc2"
 
-    def test_marks_new_doc_as_visited(self):
+    def test_arriving_doc_left_to_on_doc_change(self):
+        # Only the departing document is updated; on_doc_change sets up the arriving one.
         ta = _make_ta(self._docs())
-        _, _, metadata, _ = _perform_navigation(ta, None, 0, None, None, None)
-        assert metadata["doc1"]["visited"] is True
+        _, timing, metadata, status = _perform_navigation(ta, None, 0, None, None, None)
+        assert metadata == {}
+        assert status is no_update
+        assert "_nav_init" not in timing
+        assert "annotation_seconds_at_load" not in timing
 
-    def test_nav_init_flag_set(self):
+    def test_returns_only_departing_doc(self):
         ta = _make_ta(self._docs())
-        _, timing, _, _ = _perform_navigation(ta, None, 0, None, None, None)
-        assert timing["_nav_init"] is True
+        metadata_in = {"doc1": {"visited": True}, "doc2": {"notes": "x"}}
+        _, _, metadata, _ = _perform_navigation(ta, "doc1", 1, {}, None, metadata_in)
+        assert set(metadata) == {"doc1"}
 
     def test_paused_cleared_on_nav(self):
         ta = _make_ta(self._docs())
@@ -344,25 +353,6 @@ class TestPerformNavigation:
         _, _, metadata, _ = _perform_navigation(ta, "doc1", 1, timing_in, None, metadata_in)
         # Should have accumulated ~10 more seconds on top of the stored 5
         assert metadata["doc1"]["annotation_seconds"] >= 14.0
-
-    def test_annotation_seconds_at_load_reflects_new_doc(self):
-        ta = _make_ta(self._docs())
-        metadata_in = {"doc2": {"annotation_seconds": 30.0}}
-        _, timing, _, _ = _perform_navigation(ta, None, 1, {}, None, metadata_in)
-        assert timing["annotation_seconds_at_load"] == 30.0
-
-    def test_annotation_seconds_at_load_zero_for_unvisited_doc(self):
-        ta = _make_ta(self._docs())
-        _, timing, _, _ = _perform_navigation(ta, None, 0, {}, None, None)
-        assert timing["annotation_seconds_at_load"] == 0.0
-
-    def test_arriving_doc_is_in_progress(self):
-        # Arriving at a doc marks it in_progress regardless of required widgets.
-        # Completion only happens when navigating *away*.
-        ta = _make_ta(self._docs(), required_widgets=[])
-        _, _, metadata, status = _perform_navigation(ta, None, 0, {}, None, None)
-        assert status == "in_progress"
-        assert metadata["doc1"]["status"] == "in_progress"
 
     def test_departing_doc_marked_complete_when_no_required_widgets(self):
         # Navigating away marks the departing doc complete when no required widgets.
@@ -426,3 +416,62 @@ class TestDocIndex:
         assert _doc_index(ta, "doc2") == 0
         assert _doc_index(ta, "doc9") == 1
         assert _doc_index(ta, "doc1") is None
+
+
+# ---------------------------------------------------------------------------
+# Current-document slice and patches (#108)
+# ---------------------------------------------------------------------------
+
+def _ops(patch):
+    return [(o["operation"], o["location"], o["params"].get("value"))
+            for o in patch.to_plotly_json()["operations"]]
+
+
+class TestSliceStores:
+    def test_one_document_stores(self):
+        s = {"doc_id": "d1", "annotations": {"a": 1}, "metadata": {"flagged": True}}
+        assert _slice_stores(s) == ({"d1": {"a": 1}}, {"d1": {"flagged": True}})
+
+    def test_missing_entries_give_empty_stores(self):
+        s = {"doc_id": "d1", "annotations": None, "metadata": None}
+        assert _slice_stores(s) == ({}, {})
+
+    def test_no_slice(self):
+        assert _slice_stores(None) == ({}, {})
+
+    def test_matching_doc_id(self):
+        s = {"doc_id": "d1", "annotations": {}, "metadata": {}}
+        assert _slice_stores(s, "d1") == ({"d1": {}}, {"d1": {}})
+
+    def test_mismatched_doc_id_is_none(self):
+        # A slice for another document must not be used to write this one.
+        s = {"doc_id": "d1", "annotations": {}, "metadata": {}}
+        assert _slice_stores(s, "d2") is None
+
+
+class TestMetaPatch:
+    def test_only_changed_fields(self):
+        before = {"d1": {"flagged": False, "notes": "x"}}
+        after = {"d1": {"flagged": True, "notes": "x"}}
+        assert _ops(_meta_patch(before, after)) == [("Merge", ["d1"], {"flagged": True})]
+
+    def test_new_document_writes_all_fields(self):
+        assert _ops(_meta_patch({}, {"d1": {"visited": True}})) == [("Merge", ["d1"], {"visited": True})]
+
+    def test_unchanged_is_no_update(self):
+        assert _meta_patch({"d1": {"a": 1}}, {"d1": {"a": 1}}) is no_update
+
+    def test_empty_and_no_update(self):
+        assert _meta_patch({}, {}) is no_update
+        assert _meta_patch({}, no_update) is no_update
+
+
+class TestDictPatch:
+    def test_only_changed_keys(self):
+        assert _ops(_dict_patch({"a": 1, "b": 2}, {"a": 1, "b": 3})) == [("Merge", [], {"b": 3})]
+
+    def test_unchanged_is_no_update(self):
+        assert _dict_patch({"a": 1}, {"a": 1}) is no_update
+
+    def test_none_before(self):
+        assert _ops(_dict_patch(None, {"a": 1})) == [("Merge", [], {"a": 1})]

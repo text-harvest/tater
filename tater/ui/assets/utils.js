@@ -89,6 +89,49 @@ Object.assign(window.dash_clientside.tater, {
     },
 
     /**
+     * The current document's slice of annotations-store / metadata-store (#108):
+     * {doc_id, annotations, metadata}. Server callbacks read it instead of the whole
+     * stores. Returns [currentDocSlice, docLoadSlice]: current-doc-slice follows every
+     * change; doc-load-slice changes only on navigation, or with "reload": true when
+     * repeater-load-trigger fires (a repeater item was deleted). The layout fills both
+     * for the first document, so this isn't called on page load.
+     */
+    buildDocSlices: function (docId, annotationsData, metadataData, _reloadTrigger) {
+        var nu = window.dash_clientside.no_update;
+        var id = docId || "";
+        var pick = function (store) {
+            var v = id && store ? store[id] : undefined;
+            return v === undefined ? null : v;
+        };
+        var slice = { doc_id: id, annotations: pick(annotationsData), metadata: pick(metadataData) };
+        var triggered = (window.dash_clientside.callback_context.triggered || [])
+            .map(function (t) { return t.prop_id; });
+        var nav = triggered.indexOf("current-doc-id.data") !== -1;
+        var reload = triggered.indexOf("repeater-load-trigger.data") !== -1;
+        if (!nav && !reload) { return [slice, nu]; }
+        return [slice, Object.assign({ reload: !nav }, slice)];
+    },
+
+    /**
+     * After an edit, set the current document's status from its visited flag (the
+     * clientside twin of update_status_for_doc in callbacks/helpers.py): in_progress
+     * once visited, else not_started. Writes nothing when the status is unchanged,
+     * which is almost always; the case it exists for is editing a document that
+     * Finish marked complete.
+     */
+    updateStatusFromAnnotations: function (_annotationsData, docId, metadataData) {
+        var nu = window.dash_clientside.no_update;
+        if (!docId) { return [nu, nu]; }
+        var meta = (metadataData && metadataData[docId]) || {};
+        var oldStatus = meta.status || "not_started";
+        var newStatus = meta.visited ? "in_progress" : "not_started";
+        if (newStatus === oldStatus) { return [nu, nu]; }
+        var updated = Object.assign({}, metadataData);
+        updated[docId] = Object.assign({}, meta, { status: newStatus });
+        return [newStatus, updated];
+    },
+
+    /**
      * Update the session-level status count badges in the header.
      * Returns [nsText, ipText, cText] for the NS / IP / C badges.
      */

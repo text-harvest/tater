@@ -54,6 +54,11 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
     ann_data, meta_data = tater_app._store_data()
     docs = tater_app.documents
     current_doc_id = docs[min(tater_app.current_doc_index, len(docs) - 1)].id if docs else ""
+    doc_slice = {
+        "doc_id": current_doc_id,
+        "annotations": ann_data.get(current_doc_id) if current_doc_id else None,
+        "metadata": meta_data.get(current_doc_id) if current_doc_id else None,
+    }
 
     # Global span stores — always included so span callbacks are always registered
     span_stores = [
@@ -166,9 +171,14 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
             dcc.Store(id="schema-warnings-store", data=tater_app._schema_warnings),
             dcc.Store(id="annotations-store", data=ann_data),
             dcc.Store(id="metadata-store", data=meta_data),
+            # The current document's slice of the two stores above (#108); kept current
+            # clientside by buildDocSlices. See setup_callbacks in callbacks/core.py.
+            dcc.Store(id="current-doc-slice", data=doc_slice),
+            dcc.Store(id="doc-load-slice", data={**doc_slice, "reload": False}),
             dcc.Interval(id="clock-interval", interval=1000, n_intervals=0),
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
             dcc.Store(id="doc-select-nav", data=None),
+            dcc.Store(id="nav-clicks-applied", data={"prev": 0, "next": 0}),  # see navigate_buttons
             dcc.Store(id="doc-select-state-sink", data=None),  # dummy output of updateDocSelectState
             doc_list_store,
             *span_stores,
@@ -410,6 +420,7 @@ def _build_app_footer(is_hosted: bool = False) -> dmc.AppShellFooter:
                                 nothingFoundMessage="No matching documents",
                                 renderOption={"function": "docRenderOption"},
                                 filter={"function": "docFilter"},
+                                limit=200,
                                 maxDropdownHeight=400,
                                 size="sm",
                                 rightSection=DashIconify(icon="tabler:selector", width=16),

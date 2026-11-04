@@ -17,13 +17,13 @@ from dash import no_update
 
 from tater.models.document import Document
 from tater.ui.callbacks.core import (
+    _button_step,
     _load_flag_and_notes_impl,
     _navigate_select_impl,
     _on_doc_change_impl,
     _save_flag_impl,
     _save_notes_impl,
     _toggle_pause_impl,
-    _update_status_from_annotations_impl,
     _update_save_status_impl,
 )
 
@@ -96,45 +96,38 @@ class TestOnDocChange:
     def _ta(self):
         return _make_ta()
 
-    # -- _nav_init fast-path --
+    # -- After navigation (the clock is already running) --
 
-    def test_nav_init_returns_no_update_for_timing_and_metadata(self):
-        timing = {"_nav_init": True}
-        metadata = {"doc1": {"status": "complete"}}
-        timing_out, status, meta_out = _on_doc_change_impl(
-            self._ta(), "doc1", timing, None, metadata
+    def test_keeps_running_clock(self):
+        # Navigation restarted the clock; restarting it again would drop time.
+        started = time.time() - 5
+        timing_out, _, _ = _on_doc_change_impl(
+            self._ta(), "doc1", {"doc_start_time": started, "paused": False}, None, None
         )
-        assert timing_out is no_update
+        assert timing_out["doc_start_time"] == started
+
+    def test_revisit_writes_no_metadata(self):
+        metadata = {"doc1": {"visited": True, "status": "in_progress"}}
+        _, status, meta_out = _on_doc_change_impl(self._ta(), "doc1", {}, None, metadata)
+        assert status == "in_progress"
         assert meta_out is no_update
 
-    def test_nav_init_reads_status_from_metadata(self):
-        timing = {"_nav_init": True}
-        metadata = {"doc1": {"status": "in_progress"}}
-        _, status, _ = _on_doc_change_impl(
-            self._ta(), "doc1", timing, None, metadata
-        )
+    def test_revisit_of_complete_doc_sets_in_progress(self):
+        # Completion is reassessed on departure.
+        metadata = {"doc1": {"visited": True, "status": "complete"}}
+        _, status, meta_out = _on_doc_change_impl(self._ta(), "doc1", {}, None, metadata)
         assert status == "in_progress"
+        assert meta_out["doc1"]["status"] == "in_progress"
 
-    def test_nav_init_defaults_status_when_doc_absent(self):
-        timing = {"_nav_init": True}
-        _, status, _ = _on_doc_change_impl(
-            self._ta(), "doc1", timing, None, {}
-        )
-        assert status == "not_started"
+    def test_first_visit_is_in_progress(self):
+        _, status, meta_out = _on_doc_change_impl(self._ta(), "doc1", {}, None, {})
+        assert status == "in_progress"
+        assert meta_out["doc1"]["visited"] is True
 
-    def test_nav_init_false_does_not_short_circuit(self):
-        timing = {"_nav_init": False}
-        timing_out, _, _ = _on_doc_change_impl(
-            self._ta(), "doc1", timing, None, None
-        )
-        assert timing_out is not no_update
-
-    def test_nav_init_missing_key_does_not_short_circuit(self):
-        timing = {"doc_start_time": time.time()}
-        timing_out, _, _ = _on_doc_change_impl(
-            self._ta(), "doc1", timing, None, None
-        )
-        assert timing_out is not no_update
+    def test_returns_only_the_arriving_doc(self):
+        metadata = {"doc1": {"visited": False}, "doc2": {"notes": "x"}}
+        _, _, meta_out = _on_doc_change_impl(self._ta(), "doc1", {}, None, metadata)
+        assert set(meta_out) == {"doc1"}
 
     # -- Initial page load path --
 
@@ -317,9 +310,11 @@ class TestNavigateSelect:
             self._ta(), {"id": "doc3", "t": 1}, "doc1", {}, {}, {}
         )
         assert doc_id == "doc3"
-        assert timing["_nav_init"] is True
+        assert "_nav_init" not in timing
+        # Only the departing document; on_doc_change sets up the arriving one.
+        assert set(metadata) == {"doc1"}
         assert metadata["doc1"]["visited"] is True
-        assert metadata["doc3"]["visited"] is True
+        assert status is no_update
 
     def test_same_document_is_noop(self):
         result = _navigate_select_impl(self._ta(), {"id": "doc1", "t": 1}, "doc1", {}, {}, {})
@@ -417,29 +412,24 @@ class TestSaveNotes:
 
 
 # ---------------------------------------------------------------------------
-# _update_status_from_annotations_impl
+# _button_step
 # ---------------------------------------------------------------------------
 
-class TestUpdateStatusFromAnnotations:
-    def test_unchanged_status_is_noop(self):
-        # An edit on a visited doc keeps it in_progress; writing metadata-store anyway
-        # would trigger a second full-store auto_save per edit.
-        meta = {"doc1": {"visited": True, "status": "in_progress"}}
-        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta) == (no_update, no_update)
+class TestButtonStep:
+    def test_first_next(self):
+        assert _button_step(None, 1, {"prev": 0, "next": 0}) == (1, {"prev": 0, "next": 1})
 
-    def test_unvisited_not_started_is_noop(self):
-        assert _update_status_from_annotations_impl(_make_ta(), {}, "doc1", {}) == (no_update, no_update)
+    def test_overlapping_clicks_step_from_same_base(self):
+        # The second request is sent before the first response updated anything.
+        applied = {"prev": 0, "next": 0}
+        assert _button_step(None, 1, applied)[0] == 1
+        assert _button_step(None, 2, applied)[0] == 2
 
-    def test_changed_status_is_written(self):
-        meta = {"doc1": {"visited": True, "status": "not_started"}}
-        status, metadata = _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
-        assert status == "in_progress"
-        assert metadata["doc1"]["status"] == "in_progress"
+    def test_prev_and_next_net_out(self):
+        assert _button_step(2, 3, {"prev": 1, "next": 1}) == (1, {"prev": 2, "next": 3})
 
-    def test_does_not_mutate_input(self):
-        meta = {"doc1": {"visited": True, "status": "not_started"}}
-        _update_status_from_annotations_impl(_make_ta(), {}, "doc1", meta)
-        assert meta["doc1"]["status"] == "not_started"
+    def test_prev(self):
+        assert _button_step(1, 0, {"prev": 0, "next": 0})[0] == -1
 
-    def test_no_doc_is_noop(self):
-        assert _update_status_from_annotations_impl(_make_ta(), {}, None, {}) == (no_update, no_update)
+    def test_missing_applied(self):
+        assert _button_step(None, 1, None) == (1, {"prev": 0, "next": 1})

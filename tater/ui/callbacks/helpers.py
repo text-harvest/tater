@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from dash import html, no_update
+from dash import Patch, html, no_update
 from tater.ui import value_helpers
 from tater.ui.constants import STATUS_COLORS, STATUS_LABELS
 from tater.widgets.base import ContainerWidget, ControlWidget
@@ -40,6 +40,61 @@ def _get_meta(metadata_data: dict | None, doc_id: str | None) -> dict:
     if stored is None:
         return base
     return {**base, **stored}
+
+
+def _slice_stores(doc_slice: dict | None, doc_id: str | None = None) -> tuple[dict, dict] | None:
+    """Turn a ``current-doc-slice`` / ``doc-load-slice`` into one-document stores.
+
+    Returns ``({doc_id: annotations}, {doc_id: metadata})``, the shape the ``*_impl``
+    functions and widget renderers read with ``.get(doc_id)``. Returns None when the
+    slice is for a different document than ``doc_id`` (when given): the caller must
+    then not write that document's metadata, or it would replace it with defaults.
+    """
+    sid = (doc_slice or {}).get("doc_id") or ""
+    if doc_id is not None and sid != (doc_id or ""):
+        return None
+    if not sid:
+        return {}, {}
+    ann, meta = doc_slice.get("annotations"), doc_slice.get("metadata")
+    return ({sid: ann} if ann is not None else {}), ({sid: meta} if meta is not None else {})
+
+
+def _meta_patch(before: dict | None, after):
+    """A ``Patch`` for metadata-store writing only the fields that changed.
+
+    ``before`` / ``after`` are ``{doc_id: meta}`` dicts as the ``*_impl`` functions take
+    and return; ``after`` may be ``no_update``. Fields are merged into each document's
+    entry, so fields not in ``after`` (and other documents) are left alone. Returns
+    ``no_update`` when nothing changed.
+    """
+    if after is no_update or not after:
+        return no_update
+    before = before or {}
+    patch, changed = Patch(), False
+    for doc_id, meta in after.items():
+        old = before.get(doc_id) or {}
+        diff = {k: v for k, v in (meta or {}).items() if k not in old or old[k] != v}
+        if diff:
+            patch[doc_id].update(diff)
+            changed = True
+    return patch if changed else no_update
+
+
+def _dict_patch(before: dict | None, after):
+    """A ``Patch`` setting only the keys of ``after`` that differ from ``before``.
+
+    Used for timing-store, so a slow response can't overwrite keys another callback
+    changed in the meantime. Returns ``no_update`` when nothing changed.
+    """
+    if after is no_update or after is None:
+        return no_update
+    before = before or {}
+    diff = {k: v for k, v in after.items() if k not in before or before[k] != v}
+    if not diff:
+        return no_update
+    patch = Patch()
+    patch.update(diff)
+    return patch
 
 
 def _has_value(value) -> bool:
@@ -199,19 +254,22 @@ def _doc_index(tater_app: TaterApp, doc_id: str | None) -> int | None:
 
 def _perform_navigation(
     tater_app: TaterApp,
-    current_doc_id: str,
+    current_doc_id: str | None,
     new_index: int,
-    timing_data: dict,
+    timing_data: dict | None,
     annotations_data: dict | None,
     metadata_data: dict | None,
 ) -> tuple:
-    """Shared navigation logic: accumulate timing, update status, return (doc_id, timing, metadata, status).
+    """Shared navigation logic for the **departing** document.
 
-    Also marks the new document as visited and computes its initial status, so that
-    on_doc_change can detect this was a navigation event and skip redundant writes.
+    Accumulates its time, marks it visited and assesses completion, and restarts the
+    clock. Returns ``(doc_id, timing_data, metadata_data, status)``: ``metadata_data``
+    holds only the departing document (``{}`` when there is none) and ``status`` is
+    always ``no_update``. The arriving document is set up by ``on_doc_change`` from
+    ``doc-load-slice``, since only the departing document's data is sent here.
     """
     now = time.time()
-    metadata_data = dict(metadata_data or {})
+    metadata_out = {}
     if current_doc_id:
         meta = dict(_get_meta(metadata_data, current_doc_id))
         start = timing_data.get("doc_start_time") if timing_data else None
@@ -220,28 +278,17 @@ def _perform_navigation(
         # Departing this doc means the user was on it — always mark visited and assess completion.
         meta["visited"] = True
         meta["status"] = "complete" if _is_complete_eligible(tater_app, current_doc_id, annotations_data) else "in_progress"
-        metadata_data[current_doc_id] = meta
+        metadata_out[current_doc_id] = meta
 
     doc_id = tater_app.documents[new_index].id if new_index < len(tater_app.documents) else ""
-
-    # Mark the new doc as visited and compute its status here, so on_doc_change
-    # can skip its own metadata/timing writes when it sees _nav_init=True.
     if doc_id:
-        new_meta = dict(_get_meta(metadata_data, doc_id))
-        new_meta["visited"] = True
-        metadata_data[doc_id] = new_meta
-        update_status_for_doc(tater_app, doc_id, annotations_data, metadata_data)
+        tater_app.current_doc_index = new_index
 
-    status = metadata_data.get(doc_id, {}).get("status", "not_started") if doc_id else "not_started"
-
-    if timing_data is None:
-        timing_data = {}
+    timing_data = dict(timing_data or {})
     timing_data["last_save_time"] = now
     timing_data["doc_start_time"] = now
     timing_data["paused"] = False
-    timing_data["_nav_init"] = True
-    if "session_start_time" not in timing_data or timing_data["session_start_time"] is None:
+    if timing_data.get("session_start_time") is None:
         timing_data["session_start_time"] = now
-    timing_data["annotation_seconds_at_load"] = _get_meta(metadata_data, doc_id).get("annotation_seconds", 0.0) if doc_id else 0.0
 
-    return doc_id, timing_data, metadata_data, status
+    return doc_id, timing_data, metadata_out, no_update

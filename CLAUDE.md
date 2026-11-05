@@ -25,6 +25,7 @@ tater/                  # Library package
     document_loader.py  # load_documents(path) — dispatches on extension;
                         #   _load_tabular accepts Path or file-like (StringIO/BytesIO)
   ui/                   # App machinery (TaterApp, layout, callbacks, value_helpers)
+    trace.py            # install_trace: --trace / TATER_TRACE callback trace for perf/
     upload_layout.py    # Hosted-mode upload page layout + callbacks;
                         #   also contains _LLM_PROMPT constant and _build_llm_prompt_modal()
     schema_builder.py   # No-code schema builder modal for hosted mode
@@ -44,6 +45,8 @@ apps/
     schema/             # JSON schema-file examples
     data/               # Sample documents and ontologies (e.g. pet_ontology.yaml)
     notebooks/          # Jupyter notebook examples (simple_annotation.ipynb)
+perf/                   # Performance harness (#108): synthetic projects, Playwright
+                        #   measurements, callback-trace report. Not in the wheel or pytest run.
 spec/                   # Design documents (see below)
 ```
 
@@ -64,8 +67,10 @@ tater --hosted [--port 8050] [--host 0.0.0.0]
 ```
 
 CLI flags: `--documents` (required in single mode), `--config` or `--schema` (one required in single mode),
-`--annotations`, `--no-restore`, `--port`, `--host`, `--debug`, `--hosted`
-(also via `TATER_APP_PORT` / `TATER_APP_HOST` / `TATER_APP_DEBUG` env vars).
+`--annotations`, `--no-restore`, `--port`, `--host`, `--debug`, `--hosted`, `--trace PATH`
+(also via `TATER_APP_PORT` / `TATER_APP_HOST` / `TATER_APP_DEBUG` / `TATER_TRACE` env vars).
+`--trace` appends one JSON line per callback request (output, trigger, bytes, ms, status) and adds
+`POST /_tater/trace/action` to label them; nothing is registered without it.
 
 Notebook examples (`apps/examples/notebooks/`) use `tater.annotate()` with `jupyter_mode="inline"`
 or `"tab"`. Install notebook extras with `uv sync --extra notebook`. Run `uv run nbstripout --install`
@@ -92,16 +97,59 @@ outputs, execution counts, and kernel metadata on `git add`).
   `document-text-store`. The JS `renderDocumentSpans` fires on that store change (and on
   `span-any-change`) to render annotated text clientside — no server round-trip for rendering.
 - **Persistence**: annotation and metadata state lives in `dcc.Store` components
-  (`annotations-store`, `metadata-store`) in the browser. All mutations are clientside. The
-  `auto_save` server callback fires on store changes and calls `TaterApp._save_stores_to_file()`
-  to persist to disk. `auto_save` is not registered in hosted mode (`annotations_path` is
+  (`annotations-store`, `metadata-store`) in the browser. All mutations are clientside. Saving
+  sends only what changed (#108): the clientside `emitSaveDelta` (`utils.js`) finds the
+  documents whose objects changed since its last call (identity, then JSON against what it last
+  sent) and writes `save-delta` = `{page, seq, docs: {doc_id: {annotations?, metadata?}}}`;
+  `initSaveBaseline` records the stores as loaded. The `auto_save` server callback takes only
+  `save-delta`, and `TaterApp._save_delta_to_file()` merges it into the server copy (ignoring a
+  delta older than one already applied to that document from the same page) and writes the file
+  from that copy, at most once per `save_interval` (default 2 s): the first save after a quiet
+  spell is written at once, later ones within the interval by one write at its end, on a
+  background thread that serializes a shallow snapshot, so merging never waits on the disk.
+  `flush_saves()` writes what's pending; it runs at exit (`atexit`; the CLI turns SIGTERM into
+  a normal exit), and tests call it before reading the file (`read_saved` in
+  `test_browser.py`). `get_annotations()` returns the server copy, not the file, which can lag. This relies on store writers replacing only the documents they change (a
+  `Patch()`, or `Object.assign({}, store, {[id]: newDoc})` clientside); a writer that rebuilds
+  every document's object still saves correctly but sends every document. `on_save` is called
+  for each document whose annotations were in the delta. `auto_save` is not registered in hosted mode (`annotations_path` is
   `None`); annotations live in the browser and the user downloads them explicitly.
-  Format: `{doc_id: {annotations: {...}, metadata: {...}}}`.
+  Format: `{doc_id: {annotations: {...}, metadata: {...}}}`. Saves write a temp file and
+  `os.replace` it (`_write_json_atomic`), so a crash never leaves a truncated file.
+- **Server copy of the stores**: `TaterApp._store_data()` returns the current
+  `(annotations, metadata)` dicts. It's built lazily from `annotations` / `metadata` and updated
+  by every save-delta (`_apply_save_delta`, called by `auto_save`; in hosted mode by the
+  output-less `mirror_stores` callback). The layout is a function (`_setup_layout`, and
+  `serve_layout` in hosted mode) that reads `_store_data()`, so a refresh or a new tab gets the
+  latest state. Don't build the stores from `annotations` / `metadata` directly — those hold the
+  startup state, and a stale page load is overwritten into the file by the next auto-save.
+  Likewise `current-doc-id` starts at `TaterApp.current_doc_index`, which `_perform_navigation`
+  sets, so a refresh reopens the last document (in memory only; a restart opens the first).
 - **value_helpers**: `get_model_value` / `set_model_value` in `tater/ui/value_helpers.py`
   handle dot-path reads/writes into nested Pydantic model instances.
-- **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `current-doc-id`
-  change and populates both `flag-document` (checked) and `document-notes` (value) from
-  `metadata-store`. This is the only callback that writes to these outputs on navigation,
+- **Current-document slice** (#108): server callbacks never take `annotations-store` /
+  `metadata-store` as input (except `auto_save`, hosted `mirror_stores` / download, and the
+  rare Finish / go-to-first-incomplete). Instead the clientside `buildDocSlices` (`utils.js`)
+  keeps two stores of `{doc_id, annotations, metadata}` for the current document:
+  `current-doc-slice` follows every change and is read as `State` by callbacks a user action
+  triggers (flag, notes, pause, save, HL changes, repeater add/delete, navigation's departing
+  doc); `doc-load-slice` changes only on navigation, or with `"reload": true` after a repeater
+  delete, and is the `Input` for callbacks that set up the arriving document (`on_doc_change`,
+  `load_flag_and_notes`, repeater and HL loads). The layout fills both for the first document.
+  Server shells turn a slice into one-document stores with `_slice_stores` (`helpers.py`), so
+  the `*_impl` functions and widget renderers keep reading `store.get(doc_id)`, and write back
+  with `_meta_patch` / `_dict_patch` (only changed fields). `_slice_stores(slice, doc_id)`
+  returns None when the slice is for another document; don't write metadata then, or the
+  document's metadata is replaced by defaults.
+- **Navigation**: `_perform_navigation` handles only the departing document (time, visited,
+  complete / in_progress) and restarts the clock; `on_doc_change` handles the arriving one
+  (visited, in-flight status, `annotation_seconds_at_load`). Edits set a visited document back
+  to `in_progress` clientside (`updateStatusFromAnnotations`).
+  Prev/Next step by the clicks not yet applied (`nav-clicks-applied`), not by one, so clicks
+  whose requests overlap aren't lost (`_button_step`).
+- **Flag/notes loading**: `load_flag_and_notes` in `callbacks/core.py` fires on `doc-load-slice`
+  (navigation) and populates both `flag-document` (checked) and `document-notes` (value) from
+  the arriving document's metadata. This is the only callback that writes to these outputs on navigation,
   and it returns `no_update` for a control that already shows the right value. Setting a
   control re-fires `save_flag` / `save_notes`, so those also return `no_update` when the value
   equals what is already stored — otherwise every navigation would write `metadata-store`
@@ -114,6 +162,8 @@ outputs, execution counts, and kernel metadata on `git add`).
   `docRenderOption` (in `assets/utils.js`) read it when the dropdown renders to filter, draw
   the status badge/flag, and search (exact position first, then name/id/info substring). A
   user pick goes through `docSelectChanged` → `doc-select-nav` store → server `navigate_select`.
+  The Select has `limit=200` (`docFilter` slices to it): without it the closed Select
+  re-rendered all options on every navigation, ~1 s per Next at 10k.
   Don't make the option list depend on metadata again — re-sending 2,500 options to the Select
   cost ~120 ms per Next — and don't reintroduce per-document components with pattern-matching
   IDs: at ~2,500 docs they froze the UI for seconds per action (#107).
@@ -227,6 +277,12 @@ this version:
 
 ## Dash callback gotchas
 
+**Dash waits for pending Inputs, not State**: before running a callback, the renderer waits
+for other callbacks that will change its `Input`s (`getReadyCallbacks`), but reads `State` as it
+is at that moment. So a callback triggered by `current-doc-id` that reads a store derived from
+`current-doc-id` as `State` gets the old value. Take the derived store as the `Input` instead
+(that's why `doc-load-slice` exists alongside `current-doc-slice`).
+
 **Pattern-matching phantom fires**: when a callback uses `Input({...}, ALL)` pattern matching,
 Dash re-fires the callback when matching components are re-rendered (e.g. after another callback
 updates the component tree). Guard against this by checking that the triggered value is non-zero:
@@ -308,16 +364,37 @@ as the progress bar. Check new callbacks against these rules:
 - **No full stores as server callback inputs.** Dash sends a store's whole value with every
   request that lists it as `Input` or `State`. `annotations-store` and `metadata-store` hold
   every document, so each such callback ships them in full. Prefer clientside callbacks, or
-  pass only the current document's data. Return `Patch()` instead of a rebuilt dict when
-  changing one document.
+  use `current-doc-slice` / `doc-load-slice` (see Architecture). Return `Patch()` instead of a
+  rebuilt dict when changing one document (`_meta_patch`).
 - **No catch-all triggers.** Don't trigger on a whole store or an `ALL` pattern when only one
   field or document matters. Every extra trigger is another round trip, and chains of them run
   one after another.
 - **Return `no_update` when nothing changed.** A write that repeats the current value still
   fires every dependent callback, and for the stores it also triggers an auto-save.
 
-`TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests per action at
-2,500 documents. Keep it passing.
+`TestLargeDocumentSet` in `tests/test_browser.py` bounds callback requests and bytes up/down
+per Next click and per checkbox tick at 2,500 documents (Next ≤ 20 KB, tick ≤ 10 KB each way;
+measured values are the same at 500 and 10,000). `TestLargeDocumentSet10k` runs the same
+bounds at 10,000 and is marked `perf`, excluded by default (`-m perf` to run it).
+`TestSaveAtScale` in `test_save_load.py` puts ceilings on the whole-file write and the
+per-edit delta merge at 10,000 documents. Keep them passing.
+
+To measure a change, run the harness in `perf/` (needs `uv run playwright install chromium` once):
+
+```bash
+uv run python -m perf.run --sizes 500,10000 --schema checkbox,realistic --filled both
+uv run python -m perf.trace_report <trace.jsonl>      # per-action table for one trace
+uv run python -m perf.hosted_check                     # hosted mode: edits kept, sessions separate
+```
+
+`perf.hosted_check` is a correctness check, not a measurement: for the gallery, repeater and
+hierarchical examples it checks that edits survive reload and Next/Prev and that two hosted
+sessions stay separate. It stands in until #113 moves browser tests to Playwright.
+
+It writes `perf/results/<date>-<sha>.{csv,md}`: per action, requests, bytes up/down, settle time,
+long tasks, the ratio of the largest size to 500, and trace flags (an output fired more than twice,
+a request or response over 100 KB, a 204 that changed nothing). Only `perf/results/baseline.*`
+is committed. The design is in `docs/pitches/scaling/scaling-spec.md`.
 
 ## Widget conventions
 
@@ -418,7 +495,11 @@ reverts it; change dependencies with `uv add` / `uv add --dev`. Run with:
 uv run pytest tests/ --ignore=tests/test_browser.py   # fast, no browser
 uv run pytest tests/test_browser.py --headless         # browser tests
 uv run pytest tests/ --headless                        # full suite
+uv run pytest tests/test_browser.py --headless -m perf  # 10,000-document browser checks
 ```
+
+`pyproject.toml` sets `addopts = "-m 'not perf'"` and `pythonpath = ["."]` (so tests can
+import `perf.synthetic`).
 
 **Test files:**
 - `test_value_helpers.py` — `get_model_value` / `set_model_value` and dict variants
@@ -426,13 +507,14 @@ uv run pytest tests/ --headless                        # full suite
 - `test_bind_schema.py` — `bind_schema` for all widget types (happy path + error cases)
 - `test_component_id.py` — `component_id` and `conditional_wrapper_id` derivation
 - `test_decode_field_path.py` — `_decode_field_path` for standalone, single-repeater, and doubly-nested cases
-- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings
+- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
-- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore, and a 2,500-doc check that bounds callback requests per Next click and checkbox tick (#107)
+- `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
+- `test_browser.py` — `dash.testing` browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant
 
-**Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` auto-installs a matching ChromeDriver via `webdriver-manager` on first run.
+**Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` uses a ChromeDriver from `webdriver-manager`'s cache (`~/.wdm`) that matches the installed Chrome, found offline by `_cached_chromedriver`. It only calls `ChromeDriverManager().install()`, which always goes to the network, when no match is cached, e.g. on first run or after a Chrome update.
 
 **`conftest.py`** defines shared Pydantic model fixtures (`Schema`, `Pet`, `Finding`, `Measurements`, etc.) used across unit tests, and the `pytest_setup_options` hook for browser driver configuration.
 

@@ -7,7 +7,7 @@ import flask
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from dash import Input, Output, State, ALL, ctx, no_update, html, ClientsideFunction
+from dash import Input, Output, State, ALL, ctx, no_update, html, ClientsideFunction, Patch
 
 import dash_mantine_components as dmc
 
@@ -15,6 +15,9 @@ from tater.ui.callbacks.helpers import (
     _get_ann,
     _get_meta,
     _doc_index,
+    _slice_stores,
+    _meta_patch,
+    _dict_patch,
     _perform_navigation,
     update_status_for_doc,
     _status_display,
@@ -48,6 +51,22 @@ def setup_callbacks(tater_app: TaterApp) -> None:
     app.clientside_callback(
         ClientsideFunction(namespace="tater", function_name="autoScrollTop"),
         Input("current-doc-id", "data"),
+        prevent_initial_call=True,
+    )
+
+    # The current document's slice of annotations-store / metadata-store, so server
+    # callbacks never upload the whole stores (#108). current-doc-slice follows every
+    # change and is read as State by callbacks a user action triggers. doc-load-slice
+    # changes only on navigation, or on a repeater reload ("reload": true); callbacks
+    # that set up the arriving document take it as an Input so they see its data.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="buildDocSlices"),
+        Output("current-doc-slice", "data"),
+        Output("doc-load-slice", "data"),
+        Input("current-doc-id", "data"),
+        Input("annotations-store", "data"),
+        Input("metadata-store", "data"),
+        Input("repeater-load-trigger", "data"),
         prevent_initial_call=True,
     )
 
@@ -107,34 +126,38 @@ def setup_callbacks(tater_app: TaterApp) -> None:
     # Every callback that writes to these outputs MUST use allow_duplicate=True,
     # except this one (the first registered). Omitting it on any subsequent
     # callback will cause a Dash duplicate-output error at startup.
+    #
+    # Moves by the clicks not yet applied (nav-clicks-applied), not by one: a click
+    # sent before the previous click's response arrives sees the same current-doc-id,
+    # and stepping by one would lose it.
     @app.callback(
         Output("current-doc-id", "data"),
         Output("timing-store", "data"),
         Output("metadata-store", "data", allow_duplicate=True),
         Output("status-store", "data", allow_duplicate=True),
+        Output("nav-clicks-applied", "data"),
         [Input("btn-prev", "n_clicks"),
          Input("btn-next", "n_clicks")],
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
+        State("nav-clicks-applied", "data"),
         prevent_initial_call=True
     )
-    def navigate_buttons(prev_clicks, next_clicks, current_doc_id, timing_data, annotations_data, metadata_data):
+    def navigate_buttons(prev_clicks, next_clicks, current_doc_id, timing_data, doc_slice, applied):
         ta = _ta()
         if not ctx.triggered or not ta.documents:
-            return no_update, no_update, no_update, no_update
+            return no_update, no_update, no_update, no_update, no_update
 
+        step, applied_out = _button_step(prev_clicks, next_clicks, applied)
         current_index = _doc_index(ta, current_doc_id) or 0
+        new_index = min(max(current_index + step, 0), len(ta.documents) - 1)
+        if new_index == current_index:
+            return no_update, no_update, no_update, no_update, applied_out
 
-        if ctx.triggered_id == "btn-prev" and current_index > 0:
-            current_index -= 1
-        elif ctx.triggered_id == "btn-next" and current_index < len(ta.documents) - 1:
-            current_index += 1
-        else:
-            return no_update, no_update, no_update, no_update
-
-        return _perform_navigation(ta, current_doc_id, current_index, timing_data, annotations_data, metadata_data)
+        departing, ann, meta = _departing(doc_slice, current_doc_id)
+        nav = _perform_navigation(ta, departing, new_index, timing_data, ann, meta)
+        return *_nav_patches(nav, timing_data, meta), applied_out
 
     # Document selector. The static option list is built clientside once, at page
     # load. Status, flag and the status/flag filter are read by docFilter /
@@ -181,12 +204,13 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         Input("doc-select-nav", "data"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True
     )
-    def navigate_select(nav, current_doc_id, timing_data, annotations_data, metadata_data):
-        return _navigate_select_impl(_ta(), nav, current_doc_id, timing_data, annotations_data, metadata_data)
+    def navigate_select(nav, current_doc_id, timing_data, doc_slice):
+        departing, ann, meta = _departing(doc_slice, current_doc_id)
+        return _nav_patches(
+            _navigate_select_impl(_ta(), nav, departing, timing_data, ann, meta), timing_data, meta)
 
     # Auto-advance: navigate to next doc when an auto_advance widget gets a value.
     # (allow_duplicate=True required — see note above)
@@ -198,18 +222,18 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         Input("auto-advance-store", "data"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def navigate_auto_advance(trigger, current_doc_id, timing_data, annotations_data, metadata_data):
+    def navigate_auto_advance(trigger, current_doc_id, timing_data, doc_slice):
         if not trigger:
             return no_update, no_update, no_update, no_update
         ta = _ta()
         current_index = _doc_index(ta, current_doc_id) or 0
         if current_index >= len(ta.documents) - 1:
             return no_update, no_update, no_update, no_update
-        return _perform_navigation(ta, current_doc_id, current_index + 1, timing_data, annotations_data, metadata_data)
+        departing, ann, meta = _departing(doc_slice, current_doc_id)
+        return _nav_patches(_perform_navigation(ta, departing, current_index + 1, timing_data, ann, meta), timing_data, meta)
 
     # Sync filter controls → filter-store.
     @app.callback(
@@ -233,17 +257,22 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         Input("btn-finish", "n_clicks"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
+        State("current-doc-slice", "data"),
+        # The whole metadata-store: the summary needs every status. Finish is rare.
         State("metadata-store", "data"),
         prevent_initial_call=True,
     )
-    def handle_finish(n_clicks, current_doc_id, timing_data, annotations_data, metadata_data):
+    def handle_finish(n_clicks, current_doc_id, timing_data, doc_slice, metadata_data):
         if not n_clicks:
             return no_update, no_update, no_update, no_update, no_update, no_update, no_update
         ta = _ta()
         now = time.time()
-        metadata_data = dict(metadata_data or {})
+        metadata_before = metadata_data or {}
+        metadata_data = dict(metadata_before)
+        timing_before = timing_data
         timing_data = dict(timing_data or {})
+        stores = _slice_stores(doc_slice, current_doc_id)
+        annotations_data = stores[0] if stores else {}
 
         # Accumulate time, pause timer, and mark departing doc complete if eligible.
         if current_doc_id:
@@ -291,7 +320,9 @@ def setup_callbacks(tater_app: TaterApp) -> None:
 
         go_style = {"display": "none"} if all_done else {}
         status = metadata_data.get(current_doc_id, {}).get("status", "not_started") if current_doc_id else "not_started"
-        return True, title, dmc.Stack(rows, gap="xs"), go_style, metadata_data, status, timing_data
+        meta_out = {current_doc_id: metadata_data[current_doc_id]} if current_doc_id else {}
+        return (True, title, dmc.Stack(rows, gap="xs"), go_style,
+                _meta_patch(metadata_before, meta_out), status, _dict_patch(timing_before, timing_data))
 
     # "Go to first incomplete" — navigate and close modal.
     @app.callback(
@@ -303,18 +334,20 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         Input("btn-go-incomplete", "n_clicks"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
+        State("current-doc-slice", "data"),
+        # The whole metadata-store, to find the first incomplete document. Rare.
         State("metadata-store", "data"),
         prevent_initial_call=True,
     )
-    def go_to_first_incomplete(n_clicks, current_doc_id, timing_data, annotations_data, metadata_data):
+    def go_to_first_incomplete(n_clicks, current_doc_id, timing_data, doc_slice, metadata_data):
         if not n_clicks:
             return no_update, no_update, no_update, no_update, no_update
         ta = _ta()
+        departing, ann, meta = _departing(doc_slice, current_doc_id)
         for i, doc in enumerate(ta.documents):
             if _get_meta(metadata_data, doc.id).get("status") != "complete":
-                nav = _perform_navigation(ta, current_doc_id, i, timing_data, annotations_data, metadata_data)
-                return *nav, False
+                nav = _perform_navigation(ta, departing, i, timing_data, ann, meta)
+                return *_nav_patches(nav, timing_data, meta), False
         return no_update, no_update, no_update, no_update, False
 
     # Close finish modal.
@@ -326,18 +359,21 @@ def setup_callbacks(tater_app: TaterApp) -> None:
     )
 
     # Load flag and notes from metadata when the document changes. Outputs that
-    # already show the right value are skipped, so save_flag / save_notes (which
-    # send the whole metadata-store) don't fire on most navigations.
+    # already show the right value are skipped, so save_flag / save_notes don't
+    # fire on most navigations.
     @app.callback(
         Output("flag-document", "checked"),
         Output("document-notes", "value"),
-        Input("current-doc-id", "data"),
-        State("metadata-store", "data"),
+        Input("doc-load-slice", "data"),
         State("flag-document", "checked"),
         State("document-notes", "value"),
     )
-    def load_flag_and_notes(doc_id, metadata_data, shown_flag, shown_notes):
-        return _load_flag_and_notes_impl(doc_id, metadata_data, shown_flag, shown_notes)
+    def load_flag_and_notes(load_slice, shown_flag, shown_notes):
+        if (load_slice or {}).get("reload"):
+            return no_update, no_update
+        doc_id = (load_slice or {}).get("doc_id") or ""
+        _, meta = _slice_stores(load_slice)
+        return _load_flag_and_notes_impl(doc_id, meta, shown_flag, shown_notes)
 
     # Handle flag-document changes. Also fires when load_flag_and_notes sets the
     # checkbox on navigation; the impl skips the write when nothing changed.
@@ -345,22 +381,28 @@ def setup_callbacks(tater_app: TaterApp) -> None:
         Output("metadata-store", "data", allow_duplicate=True),
         Input("flag-document", "checked"),
         State("current-doc-id", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def save_flag(checked, doc_id, metadata_data):
-        return _save_flag_impl(checked, doc_id, metadata_data)
+    def save_flag(checked, doc_id, doc_slice):
+        stores = _slice_stores(doc_slice, doc_id)
+        if stores is None:
+            return no_update
+        return _meta_patch(stores[1], _save_flag_impl(checked, doc_id, stores[1]))
 
     # Handle document-notes changes (same no-op-on-navigation guard as save_flag).
     @app.callback(
         Output("metadata-store", "data", allow_duplicate=True),
         Input("document-notes", "value"),
         State("current-doc-id", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True
     )
-    def save_notes(notes, doc_id, metadata_data):
-        return _save_notes_impl(notes, doc_id, metadata_data)
+    def save_notes(notes, doc_id, doc_slice):
+        stores = _slice_stores(doc_slice, doc_id)
+        if stores is None:
+            return no_update
+        return _meta_patch(stores[1], _save_notes_impl(notes, doc_id, stores[1]))
 
     if has_instructions:
         app.clientside_callback(
@@ -372,7 +414,34 @@ def setup_callbacks(tater_app: TaterApp) -> None:
 
     is_hosted = tater_app.is_hosted
 
+    # Save deltas (#108): emitSaveDelta sends only the documents that changed, so
+    # saving never uploads the whole stores. initSaveBaseline records the stores as
+    # loaded, before anything changes them, for emitSaveDelta to diff against.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="initSaveBaseline"),
+        Output("save-baseline-sink", "data"),
+        Input("doc-list-store", "data"),
+        State("annotations-store", "data"),
+        State("metadata-store", "data"),
+    )
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="emitSaveDelta"),
+        Output("save-delta", "data"),
+        Input("annotations-store", "data"),
+        Input("metadata-store", "data"),
+        prevent_initial_call=True,
+    )
+
     if is_hosted:
+        # No auto-save in hosted mode, but keep the session's copy of the stores
+        # current so a page refresh doesn't fall back to the uploaded state.
+        @app.callback(
+            Input("save-delta", "data"),
+            prevent_initial_call=True,
+        )
+        def mirror_stores(delta):
+            _ta()._apply_save_delta(delta)
+
         # Download annotations as JSON
         @app.callback(
             Output("download-annotations", "data"),
@@ -420,23 +489,19 @@ def setup_callbacks(tater_app: TaterApp) -> None:
             return "/"
 
     if not is_hosted:
-        # Auto-save: write to file whenever annotations or metadata store changes.
-        # Not registered in hosted mode — no annotations_path, no file to write.
+        # Auto-save: merge the changed documents into the server copy and write the
+        # file from it. Not registered in hosted mode — no annotations_path.
         @app.callback(
             Output("timing-store", "data", allow_duplicate=True),
-            Input("annotations-store", "data"),
-            Input("metadata-store", "data"),
-            State("current-doc-id", "data"),
-            State("timing-store", "data"),
+            Input("save-delta", "data"),
             prevent_initial_call=True,
         )
-        def auto_save(annotations_data, metadata_data, doc_id, timing_data):
-            ta = _ta()
-            ta._save_stores_to_file(annotations_data or {}, metadata_data or {}, doc_id=doc_id)
-            now = time.time()
-            timing_data = dict(timing_data or {})
-            timing_data["last_save_time"] = now
-            return timing_data
+        def auto_save(delta):
+            if not _ta()._save_delta_to_file(delta):
+                return no_update
+            patch = Patch()
+            patch["last_save_time"] = time.time()
+            return patch
 
 
 def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
@@ -454,12 +519,17 @@ def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
         Input("btn-save", "n_clicks"),
         State("current-doc-id", "data"),
         State("timing-store", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def on_save_click(n_clicks, current_doc_id, timing_data, metadata_data):
+    def on_save_click(n_clicks, current_doc_id, timing_data, doc_slice):
         if not n_clicks:
             return no_update, no_update
+        stores = _slice_stores(doc_slice, current_doc_id)
+        if stores is None:
+            return no_update, no_update
+        metadata_before = stores[1]
+        metadata_data = metadata_before
         now = time.time()
         if timing_data is None:
             timing_data = {}
@@ -477,21 +547,27 @@ def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
             meta = _get_meta(metadata_data, current_doc_id)
             timing_data["annotation_seconds_at_load"] = meta.get("annotation_seconds", 0.0)
         timing_data["last_save_time"] = now
-        return timing_data, metadata_data
+        meta_out = {current_doc_id: metadata_data[current_doc_id]} if current_doc_id in metadata_data else {}
+        return timing_data, _meta_patch(metadata_before, meta_out)
 
-    # Handle document changes to initialize timing
+    # Set up the arriving document (visited, status, timer) on page load and on
+    # navigation. doc-load-slice is an Input, not State, so Dash runs this only after
+    # buildDocSlices has the arriving document's data (State isn't waited for).
     @app.callback(
         Output("timing-store", "data", allow_duplicate=True),
         Output("status-store", "data", allow_duplicate=True),
         Output("metadata-store", "data", allow_duplicate=True),
-        Input("current-doc-id", "data"),
+        Input("doc-load-slice", "data"),
         State("timing-store", "data"),
-        State("annotations-store", "data"),
-        State("metadata-store", "data"),
         prevent_initial_call='initial_duplicate',
     )
-    def on_doc_change(doc_id, timing_data, annotations_data, metadata_data):
-        return _on_doc_change_impl(_ta(), doc_id, timing_data, annotations_data, metadata_data)
+    def on_doc_change(load_slice, timing_data):
+        if (load_slice or {}).get("reload"):
+            return no_update, no_update, no_update
+        doc_id = (load_slice or {}).get("doc_id") or ""
+        ann, meta = _slice_stores(load_slice)
+        timing_out, status, meta_out = _on_doc_change_impl(_ta(), doc_id, timing_data, ann, meta)
+        return _dict_patch(timing_data, timing_out), status, _meta_patch(meta, meta_out)
 
     # Update save status and pause icon whenever timing-store changes (i.e. on every save,
     # navigation, or pause toggle) — no interval needed, no "Updating..." flicker.
@@ -521,11 +597,18 @@ def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
         Input("btn-pause-timer", "n_clicks"),
         State("timing-store", "data"),
         State("current-doc-id", "data"),
-        State("metadata-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def toggle_pause(n_clicks, timing_data, doc_id, metadata_data):
-        return _toggle_pause_impl(n_clicks, timing_data, doc_id, metadata_data)
+    def toggle_pause(n_clicks, timing_data, doc_id, doc_slice):
+        stores = _slice_stores(doc_slice, doc_id)
+        if stores is None:
+            return no_update, no_update
+        timing_out, meta_out = _toggle_pause_impl(n_clicks, timing_data, doc_id, stores[1])
+        if timing_out is no_update:
+            return no_update, no_update
+        meta_out = {doc_id: meta_out[doc_id]} if doc_id and doc_id in meta_out else {}
+        return timing_out, _meta_patch(stores[1], meta_out)
 
     @app.callback(
         Output("status-badge", "children"),
@@ -591,35 +674,70 @@ def _update_save_status_impl(ta, timing_data):
     return "Not saved", "dimmed"
 
 
-def _on_doc_change_impl(ta, doc_id, timing_data, annotations_data, metadata_data):
-    """Business logic for on_doc_change callback.
+def _button_step(prev_clicks, next_clicks, applied):
+    """Documents to move for the Prev/Next clicks not yet applied.
 
-    Returns (timing_data, status, metadata_data) — or (no_update, status, no_update)
-    when _nav_init is set (navigation callbacks already handled initialization).
-    The _nav_init guard prevents double-writes and cascading auto-saves on navigation.
+    ``applied`` is ``nav-clicks-applied``, the click counts the last navigation handled.
+    Returns ``(step, applied_out)``: e.g. two Next clicks whose requests overlap compute
+    +1 and +2 from the same position, so the second response lands on the right document.
     """
-    if timing_data and timing_data.get("_nav_init"):
-        status = (metadata_data or {}).get(doc_id, {}).get("status", "not_started") if doc_id else "not_started"
-        return no_update, status, no_update
+    applied = applied or {}
+    prev, nxt = prev_clicks or 0, next_clicks or 0
+    step = (nxt - applied.get("next", 0)) - (prev - applied.get("prev", 0))
+    return step, {"prev": prev, "next": nxt}
 
-    metadata_data = dict(metadata_data or {})
-    if doc_id:
-        meta = dict(_get_meta(metadata_data, doc_id))
-        meta["visited"] = True
-        metadata_data[doc_id] = meta
-        update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
 
-    if timing_data is None:
-        timing_data = {}
-    timing_data["doc_start_time"] = time.time()
-    timing_data["paused"] = False
-    if "session_start_time" not in timing_data or timing_data["session_start_time"] is None:
-        timing_data["session_start_time"] = time.time()
+def _departing(doc_slice, current_doc_id):
+    """``(departing_id, annotations, metadata)`` for a navigation callback.
+
+    The stores are one-document dicts from ``current-doc-slice``. If the slice isn't
+    for ``current_doc_id`` (it lags a moment behind a navigation), the departing
+    document isn't updated rather than overwritten with defaults.
+    """
+    stores = _slice_stores(doc_slice, current_doc_id)
+    if stores is None:
+        return None, {}, {}
+    return current_doc_id, stores[0], stores[1]
+
+
+def _nav_patches(result, timing_before, meta_before):
+    """Turn ``_perform_navigation``'s dicts into Patches for timing- and metadata-store."""
+    doc_id, timing_out, meta_out, status = result
+    if doc_id is no_update:
+        return result
+    return doc_id, _dict_patch(timing_before, timing_out), _meta_patch(meta_before, meta_out), status
+
+
+def _on_doc_change_impl(ta, doc_id, timing_data, annotations_data, metadata_data):
+    """Business logic for on_doc_change: set up the arriving document.
+
+    Runs on page load and after every navigation. Marks the document visited, sets its
+    in-flight status, and points the timer at its stored seconds. The clock is started
+    only if nothing started it: navigation callbacks already restarted it.
+
+    Returns ``(timing_data, status, metadata)``; ``metadata`` is ``{doc_id: meta}``, or
+    ``no_update`` when the document's metadata didn't change (a revisit).
+    """
+    metadata_out = no_update
     meta = _get_meta(metadata_data, doc_id) if doc_id else {}
+    if doc_id:
+        new_meta = {doc_id: {**meta, "visited": True}}
+        update_status_for_doc(ta, doc_id, annotations_data, new_meta)
+        if new_meta[doc_id] != meta:
+            metadata_out = new_meta
+        meta = new_meta[doc_id]
+
+    now = time.time()
+    timing_data = dict(timing_data or {})
+    if not timing_data.get("doc_start_time"):
+        timing_data["doc_start_time"] = now
+        timing_data["paused"] = False
+    if timing_data.get("session_start_time") is None:
+        timing_data["session_start_time"] = now
     timing_data["annotation_seconds_at_load"] = meta.get("annotation_seconds", 0.0)
 
-    status = metadata_data.get(doc_id, {}).get("status", "not_started") if doc_id else "not_started"
-    return timing_data, status, metadata_data
+    status = meta.get("status", "not_started") if doc_id else "not_started"
+    return timing_data, status, metadata_out
 
 
 def _navigate_select_impl(ta, nav, current_doc_id, timing_data, annotations_data, metadata_data):
@@ -760,8 +878,10 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
     )
 
     # --- Downstream: recompute status whenever annotations change ---
-    # Triggered by annotations-store as Input (always current after a clientside write).
-    @app.callback(
+    # Clientside: an edit sets a visited document back to in_progress (e.g. after Finish
+    # marked it complete). Usually the status is unchanged and nothing is written.
+    app.clientside_callback(
+        ClientsideFunction(namespace="tater", function_name="updateStatusFromAnnotations"),
         Output("status-store", "data", allow_duplicate=True),
         Output("metadata-store", "data", allow_duplicate=True),
         Input("annotations-store", "data"),
@@ -769,8 +889,6 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         State("metadata-store", "data"),
         prevent_initial_call=True,
     )
-    def update_status_from_annotations(annotations_data, doc_id, metadata_data):
-        return _update_status_from_annotations_impl(_ta(), annotations_data, doc_id, metadata_data)
 
     # --- Clientside load: value prop --- push annotation values to widgets on doc change
     # or repeater delete.  ev-lookup-store supplies per-field empty values so the server
@@ -796,26 +914,6 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
         prevent_initial_call="initial_duplicate",
     )
 
-
-
-def _update_status_from_annotations_impl(ta, annotations_data, doc_id, metadata_data):
-    """Business logic for update_status_from_annotations callback.
-
-    Returns (status, metadata_data), or (no_update, no_update) when there is no
-    current document or the status is unchanged — the common case for an edit, since
-    an edit never changes the in-flight status. Skipping the metadata-store write
-    avoids an extra full-store auto_save per edit.
-    """
-    if not doc_id:
-        return no_update, no_update
-    old_status = _get_meta(metadata_data, doc_id).get("status", "not_started")
-    metadata_data = dict(metadata_data or {})
-    metadata_data[doc_id] = dict(_get_meta(metadata_data, doc_id))
-    update_status_for_doc(ta, doc_id, annotations_data, metadata_data)
-    status = metadata_data[doc_id].get("status", "not_started")
-    if status == old_status:
-        return no_update, no_update
-    return status, metadata_data
 
 
 def _decode_field_path(ld: str, path: str, tf: str) -> str:

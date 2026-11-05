@@ -31,8 +31,10 @@ def read_saved(tater) -> dict:
 
     Flag/notes are persisted to disk via auto_save (server-side callback).
     tater.metadata is not updated during a browser session — the source of
-    truth is the file written by _save_stores_to_file.
+    truth is the file. Writes are throttled (save_interval), so pending edits
+    are flushed first; the server runs in this process.
     """
+    tater.flush_saves()
     return json.loads(Path(tater.annotations_path).read_text())
 
 
@@ -69,7 +71,8 @@ def tater(tmp_path, docs_file):
     app.set_annotation_widgets([
         RadioGroupWidget(schema_field="label", label="Label"),
     ])
-    return app
+    yield app
+    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
 
 
 @pytest.fixture
@@ -85,7 +88,8 @@ def tater_required(tmp_path, docs_file):
     app.set_annotation_widgets([
         RadioGroupWidget(schema_field="label", label="Label", required=True),
     ])
-    return app
+    yield app
+    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
 
 
 @pytest.fixture
@@ -101,7 +105,8 @@ def tater_auto_advance(tmp_path, docs_file):
     app.set_annotation_widgets([
         RadioGroupWidget(schema_field="label", label="Label", auto_advance=True),
     ])
-    return app
+    yield app
+    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +141,8 @@ class TestNavigation:
         dash_duo.start_server(tater.app)
         dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
         js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_element("#document-content")
-        content = dash_duo.find_element("#document-content")
-        assert "Second document text" in content.text
+        # #document-content already exists (showing doc 1): wait for the new text itself.
+        dash_duo.wait_for_contains_text("#document-content", "Second document text")
 
     def test_prev_returns_to_first_document(self, dash_duo, tater):
         dash_duo.start_server(tater.app)
@@ -262,74 +266,104 @@ class LabelsSchema(BaseModel):
 
 
 @pytest.fixture
-def tater_large(tmp_path):
-    """2,500 short documents — the scale at which the old document menu froze the UI."""
-    docs = [{"id": f"doc_{i:05d}", "text": f"Synthetic sentence number {i}."} for i in range(2500)]
-    docs_path = tmp_path / "docs_2500.json"
+def tater_large(tmp_path, request):
+    """N short documents (the test class's N; 2,500 by default, the scale at which the
+    old document menu froze the UI)."""
+    n = getattr(request.cls, "N", 2500)
+    docs = [{"id": f"doc_{i:05d}", "text": f"Synthetic sentence number {i}."} for i in range(n)]
+    docs_path = tmp_path / f"docs_{n}.json"
     docs_path.write_text(json.dumps(docs))
-    app = TaterApp(title="Large", schema_model=LabelsSchema, annotations_path=str(tmp_path / "ann_2500.json"))
+    app = TaterApp(title="Large", schema_model=LabelsSchema, annotations_path=str(tmp_path / f"ann_{n}.json"))
     app.load_documents(str(docs_path))
     app.set_annotation_widgets([CheckboxGroupWidget("labels", label="Labels", vertical=True)])
-    return app
+    yield app
+    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
 
 
+# Records each callback request: when it was sent, and its upload / download bytes.
 _COUNT_CALLBACK_REQUESTS = """
 window.__taterReqs = [];
 const origFetch = window.fetch;
-window.fetch = function (url) {
-    if (String(url).includes('_dash-update-component')) { window.__taterReqs.push(Date.now()); }
-    return origFetch.apply(this, arguments);
+window.fetch = function (url, init) {
+    if (!String(url).includes('_dash-update-component')) { return origFetch.apply(this, arguments); }
+    const rec = {t: Date.now(), up: (init && typeof init.body === 'string') ? init.body.length : 0, down: 0};
+    window.__taterReqs.push(rec);
+    return origFetch.apply(this, arguments).then(res => {
+        rec.down = Number(res.headers.get('content-length') || 0);
+        return res;
+    });
 };
 """
 
 
 def _wait_for_quiet(dash_duo, quiet=1.0, timeout=20.0):
-    """Wait until no callback request has been sent for `quiet` seconds; return the request timestamps."""
+    """Wait until no callback request has been sent for `quiet` seconds; return the requests
+    as dicts {t (ms), up, down (bytes)}."""
     start = time.time()
     while time.time() - start < timeout:
         reqs = dash_duo.driver.execute_script("return window.__taterReqs")
-        last = reqs[-1] / 1000 if reqs else start
+        last = reqs[-1]["t"] / 1000 if reqs else start
         if time.time() - last >= quiet:
             return reqs
         time.sleep(0.1)
     return dash_duo.driver.execute_script("return window.__taterReqs")
 
 
+def _kb(reqs, key):
+    return sum(r[key] for r in reqs) / 1000
+
+
 class TestLargeDocumentSet:
-    """Each action should cost a handful of callback requests, independent of N.
+    """Each action should cost a handful of small callback requests, independent of N.
 
     Before #107 a Next click at this size sent ~20 requests over ~11 s, and the
-    document menu was rebuilt several times per action.
+    document menu was rebuilt several times per action. Before #108 every Next
+    uploaded the whole annotations and metadata stores (~1.3 MB here); now an action
+    sends only the current document. The byte bounds are ~3x the measured values,
+    which are the same at 500 and 10,000 documents.
     """
 
-    def test_next_click_settles_quickly(self, dash_duo, tater_large):
-        dash_duo.start_server(tater_large.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 2500", timeout=20)
+    N = 2500
+
+    def _start(self, dash_duo, app):
+        dash_duo.start_server(app)
+        dash_duo.wait_for_text_to_equal("#document-title", f"1 / {self.N}", timeout=30)
         dash_duo.driver.execute_script(_COUNT_CALLBACK_REQUESTS)
         _wait_for_quiet(dash_duo)
         dash_duo.driver.execute_script("window.__taterReqs = []")
+
+    def test_next_click_settles_quickly(self, dash_duo, tater_large):
+        self._start(dash_duo, tater_large.app)
 
         clicked = time.time()
         js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 2500")
+        dash_duo.wait_for_text_to_equal("#document-title", f"2 / {self.N}")
         reqs = _wait_for_quiet(dash_duo)
 
         assert len(reqs) <= 10, f"{len(reqs)} callback requests for one Next click"
-        assert reqs and reqs[-1] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert reqs and reqs[-1]["t"] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert _kb(reqs, "up") <= 20, f"one Next click uploaded {_kb(reqs, 'up'):.0f} KB"
+        assert _kb(reqs, "down") <= 20, f"one Next click downloaded {_kb(reqs, 'down'):.0f} KB"
 
     def test_checkbox_tick_settles_quickly(self, dash_duo, tater_large):
-        dash_duo.start_server(tater_large.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 2500", timeout=20)
-        dash_duo.driver.execute_script(_COUNT_CALLBACK_REQUESTS)
-        _wait_for_quiet(dash_duo)
-        dash_duo.driver.execute_script("window.__taterReqs = []")
+        self._start(dash_duo, tater_large.app)
 
         clicked = time.time()
         js_click(dash_duo, "input[type='checkbox'][value='a']")
         reqs = _wait_for_quiet(dash_duo)
 
         assert len(reqs) <= 6, f"{len(reqs)} callback requests for one checkbox tick"
-        assert reqs and reqs[-1] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert reqs and reqs[-1]["t"] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert _kb(reqs, "up") <= 10, f"one tick uploaded {_kb(reqs, 'up'):.0f} KB"
+        assert _kb(reqs, "down") <= 10, f"one tick downloaded {_kb(reqs, 'down'):.0f} KB"
+
+
+@pytest.mark.perf
+class TestLargeDocumentSet10k(TestLargeDocumentSet):
+    """The same bounds at 10,000 documents (#108). Slow to set up, so excluded by
+    default; run with ``-m perf``."""
+
+    N = 10_000
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +604,37 @@ class TestSaveRestore:
 
         assert "doc1" in app2.annotations
         assert app2.annotations["doc1"].label == "uncertain"
+
+    def test_page_refresh_keeps_annotations(self, dash_duo, tater_required):
+        """A browser refresh shows the latest annotations and document, and doesn't overwrite the file.
+
+        The layout used to be built once at startup, so a refresh brought back the
+        startup state and the next auto-save wrote it over the saved edits.
+        """
+        dash_duo.start_server(tater_required.app)
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        js_click(dash_duo, "input[type='radio'][value='uncertain']")
+        time.sleep(0.8)  # wait for auto_save
+        assert read_saved(tater_required)["doc1"]["annotations"]["label"] == "uncertain"
+
+        dash_duo.driver.refresh()
+        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        time.sleep(0.8)  # page-load callbacks and any auto_save they trigger
+        assert dash_duo.find_element("input[type='radio'][value='uncertain']").is_selected()
+
+        js_click(dash_duo, "#btn-next")
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        js_click(dash_duo, "input[type='radio'][value='positive']")
+        time.sleep(0.8)
+
+        saved = read_saved(tater_required)
+        assert saved["doc1"]["annotations"]["label"] == "uncertain"
+        assert saved["doc2"]["annotations"]["label"] == "positive"
+
+        # A refresh reopens the document the user was on, not the first one.
+        dash_duo.driver.refresh()
+        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+        assert dash_duo.find_element("input[type='radio'][value='positive']").is_selected()
 
     def test_no_restore_skips_loading(self, dash_duo, tater_required, docs_file, tmp_path):
         """--no-restore (restore_annotations=False) means prior annotations are ignored."""

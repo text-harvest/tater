@@ -50,6 +50,16 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
     # Static per-doc info preloaded for the clientside nav-info callback.
     doc_list_store = dcc.Store(id="doc-list-store", data=_build_doc_list_store_data(tater_app))
 
+    # Latest saved state, not the startup state — build_layout runs on every page load.
+    ann_data, meta_data = tater_app._store_data()
+    docs = tater_app.documents
+    current_doc_id = docs[min(tater_app.current_doc_index, len(docs) - 1)].id if docs else ""
+    doc_slice = {
+        "doc_id": current_doc_id,
+        "annotations": ann_data.get(current_doc_id) if current_doc_id else None,
+        "metadata": meta_data.get(current_doc_id) if current_doc_id else None,
+    }
+
     # Global span stores — always included so span callbacks are always registered
     span_stores = [
         dcc.Store(id="span-any-change", data=0),
@@ -152,24 +162,25 @@ def build_layout(tater_app: TaterApp) -> dmc.MantineProvider:
                     ),
                 ],
             ),
-            dcc.Store(id="current-doc-id", data=tater_app.documents[0].id if tater_app.documents else ""),
+            dcc.Store(id="current-doc-id", data=current_doc_id),
             dcc.Store(id="timing-store", data={"last_save_time": None, "doc_start_time": None, "session_start_time": None, "annotation_seconds_at_load": 0.0}),
             dcc.Store(id="status-store", data="not_started"),
             dcc.Store(id="auto-advance-store", data=0),
             dcc.Store(id="aa-fields-store", data=list(tater_app._aa_fields)),
             dcc.Store(id="ev-lookup-store", data=tater_app._ev_lookup),
             dcc.Store(id="schema-warnings-store", data=tater_app._schema_warnings),
-            dcc.Store(id="annotations-store", data={
-                doc_id: ann.model_dump()
-                for doc_id, ann in tater_app.annotations.items()
-            }),
-            dcc.Store(id="metadata-store", data={
-                doc_id: meta.model_dump()
-                for doc_id, meta in tater_app.metadata.items()
-            }),
+            dcc.Store(id="annotations-store", data=ann_data),
+            dcc.Store(id="metadata-store", data=meta_data),
+            # The current document's slice of the two stores above (#108); kept current
+            # clientside by buildDocSlices. See setup_callbacks in callbacks/core.py.
+            dcc.Store(id="current-doc-slice", data=doc_slice),
+            dcc.Store(id="doc-load-slice", data={**doc_slice, "reload": False}),
             dcc.Interval(id="clock-interval", interval=1000, n_intervals=0),
             dcc.Store(id="filter-store", data={"flagged": False, "statuses": list(STATUS_LABELS.keys())}),
             dcc.Store(id="doc-select-nav", data=None),
+            dcc.Store(id="nav-clicks-applied", data={"prev": 0, "next": 0}),  # see navigate_buttons
+            dcc.Store(id="save-delta", data=None),  # changed documents only; see emitSaveDelta
+            dcc.Store(id="save-baseline-sink", data=None),  # dummy output of initSaveBaseline
             dcc.Store(id="doc-select-state-sink", data=None),  # dummy output of updateDocSelectState
             doc_list_store,
             *span_stores,
@@ -411,6 +422,7 @@ def _build_app_footer(is_hosted: bool = False) -> dmc.AppShellFooter:
                                 nothingFoundMessage="No matching documents",
                                 renderOption={"function": "docRenderOption"},
                                 filter={"function": "docFilter"},
+                                limit=200,
                                 maxDropdownHeight=400,
                                 size="sm",
                                 rightSection=DashIconify(icon="tabler:selector", width=16),

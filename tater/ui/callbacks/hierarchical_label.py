@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from dash import Input, Output, State, ALL, MATCH, ctx, no_update, ClientsideFunction
 
 from tater.ui import value_helpers
-from tater.ui.callbacks.helpers import _get_ann
+from tater.ui.callbacks.helpers import _get_ann, _slice_stores
 from tater.widgets.base import ContainerWidget
 from tater.widgets.hierarchical_label import (
     HierarchicalLabelWidget,
@@ -77,15 +77,17 @@ def setup_hl_select_callbacks(tater_app: TaterApp) -> None:
         w = _find_hl_template(_ta().widgets, field_path)
         return w if isinstance(w, HierarchicalLabelSelectWidget) else None
 
-    # 1. Load value on doc change or repeater reload
+    # 1. Load value on doc change or repeater reload (doc-load-slice covers both)
     @app.callback(
         Output({"type": "hl-select", "field": MATCH}, "value"),
-        Input("current-doc-id", "data"),
-        Input("repeater-load-trigger", "data"),
-        State("annotations-store", "data"),
-        prevent_initial_call=True,
+        Input("doc-load-slice", "data"),
+        # Runs on page load too: the widget is rendered without a value, so this is
+        # what shows the current document's stored value after a load or refresh.
+        prevent_initial_call=False,
     )
-    def load_select(doc_id, _trigger, annotations_data):
+    def load_select(load_slice):
+        doc_id = (load_slice or {}).get("doc_id")
+        annotations_data, _ = _slice_stores(load_slice)
         pipe_field = ctx.outputs_list["id"]["field"]
         field_path = pipe_field.replace("|", ".")
         ann = _get_ann(annotations_data, doc_id) if doc_id else None
@@ -99,11 +101,12 @@ def setup_hl_select_callbacks(tater_app: TaterApp) -> None:
         Output({"type": "hl-select-relay", "field": MATCH}, "data"),
         Input({"type": "hl-select", "field": MATCH}, "value"),
         State("current-doc-id", "data"),
-        State("annotations-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def handle_select_change(selected_value, doc_id, annotations_data):
-        ann = _get_ann(annotations_data, doc_id) if doc_id else None
+    def handle_select_change(selected_value, doc_id, doc_slice):
+        stores = _slice_stores(doc_slice, doc_id)
+        ann = _get_ann(stores[0], doc_id) if doc_id and stores else None
         if ann is None:
             return no_update
         path = json.loads(selected_value) if selected_value else None
@@ -167,15 +170,17 @@ def setup_hl_multi_callbacks(tater_app: TaterApp) -> None:
         w = _find_hl_template(_ta().widgets, field_path)
         return w if isinstance(w, HierarchicalLabelMultiWidget) else None
 
-    # 1. Load values on doc change or repeater reload
+    # 1. Load values on doc change or repeater reload (doc-load-slice covers both)
     @app.callback(
         Output({"type": "hl-multi", "field": MATCH}, "value"),
-        Input("current-doc-id", "data"),
-        Input("repeater-load-trigger", "data"),
-        State("annotations-store", "data"),
-        prevent_initial_call=True,
+        Input("doc-load-slice", "data"),
+        # Runs on page load too: the widget is rendered without a value, so this is
+        # what shows the current document's stored value after a load or refresh.
+        prevent_initial_call=False,
     )
-    def load_multi(doc_id, _trigger, annotations_data):
+    def load_multi(load_slice):
+        doc_id = (load_slice or {}).get("doc_id")
+        annotations_data, _ = _slice_stores(load_slice)
         pipe_field = ctx.outputs_list["id"]["field"]
         field_path = pipe_field.replace("|", ".")
         ann = _get_ann(annotations_data, doc_id) if doc_id else None
@@ -189,13 +194,13 @@ def setup_hl_multi_callbacks(tater_app: TaterApp) -> None:
         Output({"type": "hl-multi-relay", "field": MATCH}, "data"),
         Input({"type": "hl-multi", "field": MATCH}, "value"),
         State("current-doc-id", "data"),
-        State("annotations-store", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def handle_multi_change(selected_values, doc_id, annotations_data):
-        if not ctx.triggered or not ctx.triggered[0].get("value") is not None:
-            pass  # allow empty list through — that's a deliberate clear
-        ann = _get_ann(annotations_data, doc_id) if doc_id else None
+    def handle_multi_change(selected_values, doc_id, doc_slice):
+        # An empty list is let through — that's a deliberate clear.
+        stores = _slice_stores(doc_slice, doc_id)
+        ann = _get_ann(stores[0], doc_id) if doc_id and stores else None
         if ann is None:
             return no_update
         paths = [json.loads(v) for v in (selected_values or [])]

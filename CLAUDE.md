@@ -384,7 +384,12 @@ To measure a change, run the harness in `perf/` (needs `uv run playwright instal
 ```bash
 uv run python -m perf.run --sizes 500,10000 --schema checkbox,realistic --filled both
 uv run python -m perf.trace_report <trace.jsonl>      # per-action table for one trace
+uv run python -m perf.hosted_check                     # hosted mode: edits kept, sessions separate
 ```
+
+`perf.hosted_check` is a correctness check, not a measurement: for the gallery, repeater and
+hierarchical examples it checks that edits survive reload and Next/Prev and that two hosted
+sessions stay separate. It stands in until #113 moves browser tests to Playwright.
 
 It writes `perf/results/<date>-<sha>.{csv,md}`: per action, requests, bytes up/down, settle time,
 long tasks, the ratio of the largest size to 500, and trace flags (an output fired more than twice,

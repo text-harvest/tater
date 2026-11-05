@@ -81,7 +81,9 @@ def setup_hl_select_callbacks(tater_app: TaterApp) -> None:
     @app.callback(
         Output({"type": "hl-select", "field": MATCH}, "value"),
         Input("doc-load-slice", "data"),
-        prevent_initial_call=True,
+        # Runs on page load too: the widget is rendered without a value, so this is
+        # what shows the current document's stored value after a load or refresh.
+        prevent_initial_call=False,
     )
     def load_select(load_slice):
         doc_id = (load_slice or {}).get("doc_id")
@@ -172,7 +174,9 @@ def setup_hl_multi_callbacks(tater_app: TaterApp) -> None:
     @app.callback(
         Output({"type": "hl-multi", "field": MATCH}, "value"),
         Input("doc-load-slice", "data"),
-        prevent_initial_call=True,
+        # Runs on page load too: the widget is rendered without a value, so this is
+        # what shows the current document's stored value after a load or refresh.
+        prevent_initial_call=False,
     )
     def load_multi(load_slice):
         doc_id = (load_slice or {}).get("doc_id")

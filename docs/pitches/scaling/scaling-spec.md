@@ -264,7 +264,7 @@ Order from the Phase 1 baseline (section numbers are kept, since sections refer 
 4. **2.5 Debounce.** This is no longer conditional: the save measured 266 ms at 10k, on every edit.
 5. **Re-measure, then attribute long tasks** on Next and selector jumps. Profile what remains and fix from the 2.2 list, e.g. the progress badge.
 6. **2.2** — the selector limit was done with 2.3 (it was most of Next's long tasks); finish actions are dropped (rare); "fewer saves" is covered by 2.4.
-7. **2.6, 2.7** stay conditional. 2.6 needs a run with medium and long lengths. Page load (2.8 s, ×1) ranks last.
+7. **2.6, 2.7** — not needed: after 2.5, long documents cost about the same as short ones (see 2.6), and page load at 10k realistic is 0.6 s, down from 2.8 s.
 
 ### 2.1 Server mirror, per-request layout, atomic saves — do first
 
@@ -358,6 +358,8 @@ The baseline measured `_save_stores_to_file` at 266 ms at 10k (realistic, filled
 
 ### 2.6 Conditional: long documents
 
+**Measured; not needed.** After 2.5, `realistic` filled documents (10 spans each) cost about the same at every length. Next: 0.27 s / 5 KB down (short, 500 docs), 0.29 s / 55 KB (medium, 50,000 characters, 50–2,500 docs), 0.44 s / 1.0 MB with 130 ms of long tasks (long, 1,000,000 characters, 50 docs). Adding a span: 84 ms, 93 ms, 0.20 s. Tick and typing don't change with length. The browser peaked at about 600 MB with a long document (a 35 MB JS heap; the rest is the rendered page). Long documents were measured at 50 only: 500 would be 500 M characters, above `--max-total-chars`. Nothing below is planned unless documents of several million characters become a use case.
+
 Only do this if the `medium` / `long` lengths show transfer or long tasks above threshold.
 
 - `document-text-store` becomes a small LRU cache, kept clientside, of `{doc_id: text}` for documents already visited. `update_document` skips sending text the client already has; the client sends the ids it holds in a `State`.
@@ -365,6 +367,8 @@ Only do this if the `medium` / `long` lengths show transfer or long tasks above 
 - Virtualizing `renderDocumentSpans` stays out of scope unless long tasks make it the top cost.
 
 ### 2.7 Conditional: page load
+
+**Not needed.** After 2.5, page load at 10k realistic filled settles in 0.6 s (baseline 2.8 s) and uploads 8 KB; the layout's stores are downloaded once, which is the cost of having every document in the browser.
 
 If the initial payload at 10k (realistic, filled) is above threshold, don't fill `annotations-store` / `metadata-store` in the layout. Fill them from a one-shot callback after first render, or stream them in chunks. This is the least-defined item. Decide after Phase 1.
 

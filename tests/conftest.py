@@ -1,4 +1,5 @@
 """Shared fixtures for tater tests."""
+import argparse
 import os
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
@@ -6,6 +7,15 @@ from pydantic import BaseModel, Field
 import pytest
 
 from tater import SpanAnnotation
+
+
+def pytest_addoption(parser):
+    # Playwright runs headless unless given --headed; --headless is accepted so the
+    # documented commands keep working. dash[testing] registers it too while it's installed.
+    try:
+        parser.addoption("--headless", action="store_true", help="Accepted and ignored: Playwright is headless unless --headed.")
+    except (ValueError, argparse.ArgumentError):
+        pass
 
 
 # ---------------------------------------------------------------------------

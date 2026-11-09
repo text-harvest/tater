@@ -5,66 +5,13 @@ from dataclasses import dataclass, field, fields
 from typing import Callable, Optional
 
 import psutil
-from playwright.sync_api import Error, Page
+from playwright.sync_api import Page
+
+from perf.browser import QUIET_S, SETTLE_TIMEOUT_S, dash_counts, reset_counts, wait_quiet
 
 from perf.server import ServerInfo
 from perf.trace_report import flags_for, read_trace
 
-# Installed before any page script runs (``context.add_init_script``), on every document.
-#
-# Sums long tasks (>50 ms) since the last reset, and counts Dash callback requests by
-# wrapping fetch: requests, bytes up/down, in flight, and when the last one finished
-# (Date.now(), the same clock as Python's time.time()). The counts are kept in
-# sessionStorage so they survive a reload within an action.
-#
-# Requests are counted in the page, not with Playwright's request events: Playwright keeps
-# every request it reports, upload included, for the life of the page, and at 10k documents
-# an action uploads tens of MB, which ran the runner and its driver out of memory.
-INIT_SCRIPT = """
-window.__taterLongTaskMs = 0;
-window.__taterLongTaskEnd = 0;  // Date.now() at the end of the last long task
-new PerformanceObserver(list => {
-    for (const e of list.getEntries()) {
-        window.__taterLongTaskMs += e.duration;
-        window.__taterLongTaskEnd = Math.max(window.__taterLongTaskEnd,
-            performance.timeOrigin + e.startTime + e.duration);
-    }
-}).observe({type: 'longtask', buffered: true});
-
-(() => {
-    const KEY = '__taterDash';
-    let saved = null;
-    try { saved = JSON.parse(sessionStorage.getItem(KEY)); } catch (e) {}
-    const s = window.__taterDash = Object.assign(
-        {requests: 0, up: 0, down: 0, lastDone: 0}, saved || {}, {inFlight: 0});
-    const save = () => { try { sessionStorage.setItem(KEY, JSON.stringify(s)); } catch (e) {} };
-    window.__taterDashReset = () => {
-        Object.assign(s, {requests: 0, up: 0, down: 0, lastDone: Date.now()}); save();
-    };
-    const enc = new TextEncoder();
-    const origFetch = window.fetch;
-    window.fetch = function (input, init) {
-        const url = typeof input === 'string' ? input : (input && input.url) || '';
-        if (!url.includes('_dash-update-component')) return origFetch.apply(this, arguments);
-        const body = init && init.body;
-        s.requests += 1;
-        s.up += typeof body === 'string' ? enc.encode(body).length : 0;
-        s.inFlight += 1;
-        save();
-        const done = () => { s.inFlight -= 1; s.lastDone = Date.now(); save(); };
-        return origFetch.apply(this, arguments).then(async res => {
-            const len = res.headers.get('content-length');
-            s.down += len !== null ? Number(len)
-                : res.status === 204 ? 0 : (await res.clone().arrayBuffer()).byteLength;
-            done();
-            return res;
-        }, err => { done(); throw err; });
-    };
-})();
-"""
-
-QUIET_S = 0.5        # no Dash request in flight for this long means the action has settled
-SETTLE_TIMEOUT_S = 120.0
 
 
 @dataclass
@@ -105,25 +52,10 @@ class ActionRecorder:
         self.server = server
 
     def _dash(self) -> dict:
-        """The page's Dash request counters (see INIT_SCRIPT) and its title."""
-        return self.page.evaluate(
-            "({...window.__taterDash, longTaskEnd: window.__taterLongTaskEnd, title: document.title})")
+        return dash_counts(self.page)
 
     def wait_quiet(self, quiet: float = QUIET_S, timeout: float = SETTLE_TIMEOUT_S) -> None:
-        """Wait until no Dash request has been in flight, and no long task has run, for
-        ``quiet`` seconds. A page busy with clientside work has no request in flight, so
-        requests alone would call it quiet while queued callbacks are still running."""
-        deadline = time.perf_counter() + timeout
-        while time.perf_counter() < deadline:
-            self.page.wait_for_timeout(50)
-            try:
-                d = self._dash()
-            except Error:  # the page is navigating (a reload); its counters come back after
-                continue
-            last = max(d["lastDone"], d["longTaskEnd"]) / 1000
-            if not d["inFlight"] and time.time() - last >= quiet and d["title"] != "Updating...":
-                return
-        raise TimeoutError(f"page still busy after {timeout:.0f} s")
+        wait_quiet(self.page, quiet, timeout)
 
     def set_trace_label(self, label: str) -> None:
         if self.server.trace_path:
@@ -140,7 +72,8 @@ class ActionRecorder:
             setup(self.page)
         self.wait_quiet()
         self.set_trace_label(label)
-        self.page.evaluate("window.__taterLongTaskMs = 0; window.__taterDashReset()")
+        self.page.evaluate("window.__taterLongTaskMs = 0")
+        reset_counts(self.page)
         start = time.time()
         check = action(self.page)
         returned = time.time()

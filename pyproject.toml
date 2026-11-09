@@ -39,5 +39,6 @@ dev = [
     "dash[testing]>=4.0.0",
     "playwright>=1.64.1",
     "psutil>=7.2.2",
+    "pytest-playwright>=0.10.0",
     "webdriver-manager>=4.0.2",
 ]

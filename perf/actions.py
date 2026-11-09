@@ -13,6 +13,8 @@ from typing import Callable, Optional
 
 from playwright.sync_api import Page
 
+from perf.browser import control, goto_doc, position, select_word, selector_options, wait_loaded, wait_position
+
 TYPED = "quick brown fox jump"   # 20 characters
 
 
@@ -37,44 +39,6 @@ class Action:
 # ---------------------------------------------------------------------------
 # Page helpers
 # ---------------------------------------------------------------------------
-
-def position(page: Page) -> int:
-    """1-based position of the current document, from the "k / N" title."""
-    return int(page.locator("#document-title").inner_text().split("/")[0])
-
-
-def wait_position(page: Page, k: int, timeout: float = 30_000) -> None:
-    page.wait_for_function(
-        "k => (document.querySelector('#document-title')?.textContent || '').trim().startsWith(k + ' /')",
-        arg=k, timeout=timeout,
-    )
-
-
-def wait_loaded(page: Page, timeout: float = 120_000) -> None:
-    page.wait_for_function(
-        "() => (document.querySelector('#document-title')?.textContent || '').includes(' / ')",
-        timeout=timeout,
-    )
-
-
-def control(page: Page, tf: str):
-    """A widget's input, found by the ``tf`` key of its pattern-matching ID."""
-    return page.locator(f"""[id*='"tf":"{tf}"'][id*='"type":"tater-']""").first
-
-
-def _selector_options(page: Page):
-    listbox = page.locator("#document-select").get_attribute("aria-controls")
-    return page.locator(f'[id="{listbox}"] [role=option]')
-
-
-def goto_doc(page: Page, k: int) -> None:
-    """Jump to the document at position k with the selector, as a user would."""
-    select = page.locator("#document-select")
-    select.click()
-    select.fill(str(k))
-    _selector_options(page).first.click()
-    wait_position(page, k)
-
 
 def _tick_target(page: Page, schema: str):
     if schema == "checkbox":
@@ -141,30 +105,14 @@ def make_actions(sc: Scenario) -> list[Action]:
         page.locator("#document-notes").press_sequentially(TYPED, delay=50)
 
     def add_span(page: Page) -> None:
-        # Select a word in the longest stretch of untagged text, then tag it.
-        page.evaluate(
-            """k => {
-                const el = document.getElementById('document-content');
-                const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-                let node = null, n;
-                while ((n = walker.nextNode())) {
-                    if (!n.parentElement.closest('mark') && (!node || n.length > node.length)) { node = n; }
-                }
-                const words = [...node.textContent.matchAll(/\\S+/g)];
-                const w = words[k % words.length];
-                const range = document.createRange();
-                range.setStart(node, w.index); range.setEnd(node, w.index + w[0].length);
-                const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
-            }""",
-            sc.rng.randrange(1000),
-        )
+        select_word(page, sc.rng.randrange(1000))
         page.locator("""[id*='"type":"span-add-btn"'][id*='"tag":"Support"']""").click()
 
     def selector_search(page: Page) -> None:
         select = page.locator("#document-select")
         select.click()
         select.fill(str(sc.rng.randint(1, sc.n_docs))[:3])
-        _selector_options(page).first.wait_for()
+        selector_options(page).first.wait_for()
         page.keyboard.press("Escape")
 
     def annotate_next_20(page: Page) -> None:
@@ -189,7 +137,7 @@ def make_actions(sc: Scenario) -> list[Action]:
         page.keyboard.press("Escape")
         page.locator("#document-select").click()
         page.locator("#document-select").fill("")
-        _selector_options(page).first.wait_for()
+        selector_options(page).first.wait_for()
         page.keyboard.press("Escape")
 
     def clear_filter(page: Page) -> None:

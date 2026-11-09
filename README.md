@@ -593,26 +593,17 @@ tater --hosted --host 0.0.0.0 --port 8050
 
 ### Setup
 
-Install dev dependencies (includes `pytest`, `dash[testing]`, and `webdriver-manager`):
+Install dev dependencies (includes `pytest` and `pytest-playwright`), then the browser
+Playwright drives, once per machine:
 
 ```bash
 uv sync --group dev
 source .venv/bin/activate
+playwright install chromium
 ```
 
-Browser tests use Chrome by default, but Dash's testing framework supports other browsers — see the [Dash testing docs](https://dash.plotly.com/testing) for alternatives.
-
-On **macOS/Windows**, install Chrome normally from [google.com/chrome](https://www.google.com/chrome/). On **standard Linux**, use your package manager or the [official Linux install guide](https://support.google.com/chrome/a/answer/9025903).
-
-**WSL users**: Chrome must be installed via the `.deb` package (snap does not work in WSL):
-
-```bash
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-sudo dpkg -i google-chrome-stable_current_amd64.deb
-sudo apt-get install -f   # resolve any missing dependencies
-```
-
-`webdriver-manager` automatically downloads a matching ChromeDriver on first run — no manual driver install needed.
+Browser tests use Playwright's own Chromium, so there's no Chrome or ChromeDriver to install
+or keep in step.
 
 ### Running tests
 
@@ -620,8 +611,12 @@ sudo apt-get install -f   # resolve any missing dependencies
 # Unit and integration tests (fast, no browser)
 python -m pytest tests/ --ignore=tests/test_browser.py
 
-# Browser tests (headless Chrome, ~45s)
+# Browser tests (headless; ~3.5 min)
 python -m pytest tests/test_browser.py --headless
+
+# Watch them run, or keep a replayable trace of each failure in test-results/
+python -m pytest tests/test_browser.py --headed
+python -m pytest tests/test_browser.py --tracing retain-on-failure
 
 # Full suite
 python -m pytest tests/ --headless

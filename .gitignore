@@ -39,3 +39,6 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Playwright traces (--tracing retain-on-failure)
+test-results/

@@ -485,8 +485,8 @@ the JS filter.
 ## Tests
 
 Tests live in `tests/`. The project is managed with uv (`uv.lock`); `uv run` syncs `.venv`
-from the lockfile, including the `dev` dependency group (`dash[testing]`, which brings pytest
-and pins selenium `<=4.2.0`), before running. Don't `pip install` into `.venv` — the next sync
+from the lockfile, including the `dev` dependency group (pytest, pytest-playwright,
+playwright, psutil), before running. Don't `pip install` into `.venv` — the next sync
 reverts it; change dependencies with `uv add` / `uv add --dev`. Run with:
 
 ```bash
@@ -512,9 +512,17 @@ import `perf.synthetic`).
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
 - `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors)
 
-**Browser test setup** requires Google Chrome (`.deb`, not snap) and `webdriver-manager`. The `pytest_setup_options` hook in `conftest.py` uses a ChromeDriver from `webdriver-manager`'s cache (`~/.wdm`) that matches the installed Chrome, found offline by `_cached_chromedriver`. It only calls `ChromeDriverManager().install()`, which always goes to the network, when no match is cached, e.g. on first run or after a Chrome update.
+**Browser test setup:** Playwright's Chromium, installed once with `uv run playwright install
+chromium` (no Chrome or ChromeDriver; the tests run in a Claude Code sandbox). pytest-playwright
+supplies `browser` / `context` / `page`; `--headless` is accepted and ignored (headless is the
+default; `--headed` shows the browser), and `--tracing retain-on-failure` writes traces to
+`test-results/`. Single-mode tests serve their `TaterApp` on a thread in the pytest process
+(`serve` / `open_app` fixtures), so `read_saved` can call `flush_saves()`; `TestHosted` runs
+`tater --hosted` as a subprocess (`perf.server.run_tater`). Wait with `wait_quiet(page)` (from
+`perf/browser.py`, using the `INIT_SCRIPT` request counters every context gets) rather than
+sleeping.
 
-**`conftest.py`** defines shared Pydantic model fixtures (`Schema`, `Pet`, `Finding`, `Measurements`, etc.) used across unit tests, and the `pytest_setup_options` hook for browser driver configuration.
+**`conftest.py`** defines shared Pydantic model fixtures (`Schema`, `Pet`, `Finding`, `Measurements`, etc.) used across unit tests, and registers the `--headless` option.
 
 ## spec/ files
 

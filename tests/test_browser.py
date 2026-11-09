@@ -1,10 +1,14 @@
-"""Browser integration tests using dash.testing (dash_duo fixture).
+"""Browser tests with Playwright (pytest-playwright).
 
-Covers low-complexity interactions: navigation, document content display,
-flag checkbox, and notes textarea — all using simple string component IDs.
+Single-mode apps run in a thread in this process (``serve``), so a test builds its
+TaterApp in Python and ``read_saved`` can flush its saves; hosted mode runs
+``tater --hosted`` in a subprocess. Covers navigation, the document selector, flag
+and notes, annotation persistence, auto-advance, save/restore, request bounds at
+2,500 (and, marked ``perf``, 10,000) documents, every widget's round trip, and hosted
+sessions on every built-in example.
 
 Run with:
-    pytest tests/test_browser.py --headless
+    pytest tests/test_browser.py --headless      # --headed to watch
 """
 import json
 import threading
@@ -13,12 +17,14 @@ from pathlib import Path
 from typing import List, Optional, Literal
 
 import pytest
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 from pydantic import BaseModel, Field
-from selenium.webdriver.common.keys import Keys
 from werkzeug.serving import WSGIRequestHandler, make_server
 
-from perf.browser import INIT_SCRIPT, position, select_word, wait_loaded, wait_position, wait_quiet
+from perf.browser import (
+    INIT_SCRIPT, dash_counts, position, reset_counts, select_word, selector_options,
+    wait_loaded, wait_position, wait_quiet,
+)
 from perf.server import run_tater
 from tater import SpanAnnotation
 from tater.ui.tater_app import TaterApp
@@ -29,13 +35,6 @@ from tater.widgets import (
     SegmentedControlWidget, SelectWidget, SliderWidget, SpanAnnotationWidget, SwitchWidget,
     TextAreaWidget, TextInputWidget,
 )
-
-
-def js_click(dash_duo, selector):
-    """Click via JavaScript to avoid ElementClickInterceptedException from the sticky footer."""
-    el = dash_duo.find_element(selector)
-    dash_duo.driver.execute_script("arguments[0].click();", el)
-    return el
 
 
 def read_saved(tater) -> dict:
@@ -168,7 +167,7 @@ def tater(tmp_path, docs_file):
         RadioGroupWidget(schema_field="label", label="Label"),
     ])
     yield app
-    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
+    app.flush_saves()
 
 
 @pytest.fixture
@@ -185,7 +184,7 @@ def tater_required(tmp_path, docs_file):
         RadioGroupWidget(schema_field="label", label="Label", required=True),
     ])
     yield app
-    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
+    app.flush_saves()
 
 
 @pytest.fixture
@@ -202,153 +201,132 @@ def tater_auto_advance(tmp_path, docs_file):
         RadioGroupWidget(schema_field="label", label="Label", auto_advance=True),
     ])
     yield app
-    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
+    app.flush_saves()
 
 
 # ---------------------------------------------------------------------------
 # Navigation
 # ---------------------------------------------------------------------------
 
+def _title(page: Page):
+    return page.locator("#document-title")
+
+
+def _assert_disabled(page: Page, selector: str) -> None:
+    btn = page.locator(selector)
+    assert btn.get_attribute("disabled") is not None or btn.get_attribute("data-disabled") is not None
+
+
 class TestNavigation:
-    def test_first_document_shown_on_load(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+    def test_first_document_shown_on_load(self, open_app, tater):
+        page = open_app(tater)
+        expect(_title(page)).to_have_text("1 / 3")
 
-    def test_document_content_displayed(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        content = dash_duo.find_element("#document-content")
-        assert "First document text" in content.text
+    def test_document_content_displayed(self, open_app, tater):
+        page = open_app(tater)
+        expect(_title(page)).to_have_text("1 / 3")
+        assert "First document text" in page.locator("#document-content").inner_text()
 
-    def test_prev_button_disabled_on_first_doc(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        btn = dash_duo.find_element("#btn-prev")
-        assert btn.get_attribute("disabled") is not None or \
-               btn.get_attribute("data-disabled") is not None
+    def test_prev_button_disabled_on_first_doc(self, open_app, tater):
+        page = open_app(tater)
+        expect(_title(page)).to_have_text("1 / 3")
+        _assert_disabled(page, "#btn-prev")
 
-    def test_next_advances_document(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+    def test_next_advances_document(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
 
-    def test_next_content_updates(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#btn-next")
-        # #document-content already exists (showing doc 1): wait for the new text itself.
-        dash_duo.wait_for_contains_text("#document-content", "Second document text")
+    def test_next_content_updates(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#btn-next")
+        expect(page.locator("#document-content")).to_contain_text("Second document text")
 
-    def test_prev_returns_to_first_document(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "#btn-prev")
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+    def test_prev_returns_to_first_document(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.click("#btn-prev")
+        expect(_title(page)).to_have_text("1 / 3")
 
-    def test_next_button_disabled_on_last_doc(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "3 / 3")
-        btn = dash_duo.find_element("#btn-next")
-        assert btn.get_attribute("disabled") is not None or \
-               btn.get_attribute("data-disabled") is not None
+    def test_next_button_disabled_on_last_doc(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("3 / 3")
+        wait_quiet(page)
+        _assert_disabled(page, "#btn-next")
 
-    def test_multi_step_navigation(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "3 / 3")
-        js_click(dash_duo, "#btn-prev")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
+    def test_multi_step_navigation(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("3 / 3")
+        page.click("#btn-prev")
+        expect(_title(page)).to_have_text("2 / 3")
 
 
 # ---------------------------------------------------------------------------
 # Document selector
 # ---------------------------------------------------------------------------
 
-def search_document_select(dash_duo, text):
+def search_document_select(page: Page, text: str) -> list:
     """Open the document selector, replace its search text, and return the visible option texts."""
-    select = dash_duo.find_element("#document-select")
+    select = page.locator("#document-select")
     select.click()
-    select.send_keys(Keys.CONTROL, "a")
-    select.send_keys(Keys.BACKSPACE)
-    if text:
-        select.send_keys(text)
-    time.sleep(0.3)
-    return [el.text for el in dash_duo.driver.find_elements("css selector", ".mantine-Select-option")]
-
-
-def select_input_value(dash_duo, expected, timeout=4.0):
-    """Wait for the document selector's input to show `expected`; return what it shows."""
-    until = time.time() + timeout
-    value = None
-    while time.time() < until:
-        value = dash_duo.find_element("#document-select").get_attribute("value")
-        if value == expected:
-            break
-        time.sleep(0.1)
-    return value
+    select.fill(text)
+    wait_quiet(page)
+    return selector_options(page).all_inner_texts()
 
 
 class TestDocumentSelect:
-    def test_shows_current_document(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        assert select_input_value(dash_duo, "1. Doc One") == "1. Doc One"
+    def test_shows_current_document(self, open_app, tater):
+        page = open_app(tater)
+        expect(page.locator("#document-select")).to_have_value("1. Doc One")
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        expect(page.locator("#document-select")).to_have_value("2. Doc Two")
 
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        assert select_input_value(dash_duo, "2. Doc Two") == "2. Doc Two"
-
-    def test_lists_all_documents_with_status(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        options = search_document_select(dash_duo, "")
+    def test_lists_all_documents_with_status(self, open_app, tater):
+        page = open_app(tater)
+        options = search_document_select(page, "")
         assert len(options) == 3
         assert options[0].startswith("1. Doc One")
         assert "IN PROGRESS" in options[0].upper()
         assert "NOT STARTED" in options[1].upper()
 
-    def test_selecting_option_navigates(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        search_document_select(dash_duo, "3")
-        option = dash_duo.driver.find_elements("css selector", ".mantine-Select-option")[0]
-        assert option.text.startswith("3. Doc Three")
+    def test_selecting_option_navigates(self, open_app, tater):
+        page = open_app(tater)
+        search_document_select(page, "3")
+        option = selector_options(page).first
+        assert option.inner_text().startswith("3. Doc Three")
         option.click()
-        dash_duo.wait_for_text_to_equal("#document-title", "3 / 3")
-        assert "Third document text" in dash_duo.find_element("#document-content").text
+        expect(_title(page)).to_have_text("3 / 3")
+        expect(page.locator("#document-content")).to_contain_text("Third document text")
 
-    def test_search_by_name(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        options = search_document_select(dash_duo, "two")
+    def test_search_by_name(self, open_app, tater):
+        page = open_app(tater)
+        options = search_document_select(page, "two")
         assert len(options) == 1
         assert options[0].startswith("2. Doc Two")
 
-    def test_search_by_id(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        options = search_document_select(dash_duo, "doc3")
+    def test_search_by_id(self, open_app, tater):
+        page = open_app(tater)
+        options = search_document_select(page, "doc3")
         assert len(options) == 1
         assert options[0].startswith("3. Doc Three")
 
-    def test_flagged_filter(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "#flag-document")
-        time.sleep(0.3)
-        js_click(dash_duo, "#filter-flagged-check")
-        time.sleep(0.3)
-        options = search_document_select(dash_duo, "")
+    def test_flagged_filter(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#flag-document")
+        wait_quiet(page)
+        page.click("#filter-btn")
+        page.click("#filter-flagged-check")
+        page.keyboard.press("Escape")
+        wait_quiet(page)
+        options = search_document_select(page, "")
         assert len(options) == 1
         assert options[0].startswith("1. Doc One")
 
@@ -373,40 +351,7 @@ def tater_large(tmp_path, request):
     app.load_documents(str(docs_path))
     app.set_annotation_widgets([CheckboxGroupWidget("labels", label="Labels", vertical=True)])
     yield app
-    app.flush_saves()  # before dash_duo stops the server, so no save timer is left running
-
-
-# Records each callback request: when it was sent, and its upload / download bytes.
-_COUNT_CALLBACK_REQUESTS = """
-window.__taterReqs = [];
-const origFetch = window.fetch;
-window.fetch = function (url, init) {
-    if (!String(url).includes('_dash-update-component')) { return origFetch.apply(this, arguments); }
-    const rec = {t: Date.now(), up: (init && typeof init.body === 'string') ? init.body.length : 0, down: 0};
-    window.__taterReqs.push(rec);
-    return origFetch.apply(this, arguments).then(res => {
-        rec.down = Number(res.headers.get('content-length') || 0);
-        return res;
-    });
-};
-"""
-
-
-def _wait_for_quiet(dash_duo, quiet=1.0, timeout=20.0):
-    """Wait until no callback request has been sent for `quiet` seconds; return the requests
-    as dicts {t (ms), up, down (bytes)}."""
-    start = time.time()
-    while time.time() - start < timeout:
-        reqs = dash_duo.driver.execute_script("return window.__taterReqs")
-        last = reqs[-1]["t"] / 1000 if reqs else start
-        if time.time() - last >= quiet:
-            return reqs
-        time.sleep(0.1)
-    return dash_duo.driver.execute_script("return window.__taterReqs")
-
-
-def _kb(reqs, key):
-    return sum(r[key] for r in reqs) / 1000
+    app.flush_saves()
 
 
 class TestLargeDocumentSet:
@@ -417,41 +362,47 @@ class TestLargeDocumentSet:
     uploaded the whole annotations and metadata stores (~1.3 MB here); now an action
     sends only the current document. The byte bounds are ~3x the measured values,
     which are the same at 500 and 10,000 documents.
+
+    Requests are counted by INIT_SCRIPT (perf/browser.py), as in the perf harness:
+    bytes up are UTF-8 bytes (the same as characters for these ASCII bodies), and the
+    2 s bound runs to the last response finishing, not the last request being sent.
     """
 
     N = 2500
 
-    def _start(self, dash_duo, app):
-        dash_duo.start_server(app)
-        dash_duo.wait_for_text_to_equal("#document-title", f"1 / {self.N}", timeout=30)
-        dash_duo.driver.execute_script(_COUNT_CALLBACK_REQUESTS)
-        _wait_for_quiet(dash_duo)
-        dash_duo.driver.execute_script("window.__taterReqs = []")
+    def _start(self, open_app, app) -> Page:
+        page = open_app(app)
+        expect(_title(page)).to_have_text(f"1 / {self.N}", timeout=30_000)
+        wait_quiet(page, quiet=1.0)
+        reset_counts(page)
+        return page
 
-    def test_next_click_settles_quickly(self, dash_duo, tater_large):
-        self._start(dash_duo, tater_large.app)
-
-        clicked = time.time()
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", f"2 / {self.N}")
-        reqs = _wait_for_quiet(dash_duo)
-
-        assert len(reqs) <= 10, f"{len(reqs)} callback requests for one Next click"
-        assert reqs and reqs[-1]["t"] / 1000 - clicked < 2.0, "callback cascade took too long"
-        assert _kb(reqs, "up") <= 20, f"one Next click uploaded {_kb(reqs, 'up'):.0f} KB"
-        assert _kb(reqs, "down") <= 20, f"one Next click downloaded {_kb(reqs, 'down'):.0f} KB"
-
-    def test_checkbox_tick_settles_quickly(self, dash_duo, tater_large):
-        self._start(dash_duo, tater_large.app)
+    def test_next_click_settles_quickly(self, open_app, tater_large):
+        page = self._start(open_app, tater_large)
 
         clicked = time.time()
-        js_click(dash_duo, "input[type='checkbox'][value='a']")
-        reqs = _wait_for_quiet(dash_duo)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text(f"2 / {self.N}")
+        wait_quiet(page, quiet=1.0)
+        d = dash_counts(page)
 
-        assert len(reqs) <= 6, f"{len(reqs)} callback requests for one checkbox tick"
-        assert reqs and reqs[-1]["t"] / 1000 - clicked < 2.0, "callback cascade took too long"
-        assert _kb(reqs, "up") <= 10, f"one tick uploaded {_kb(reqs, 'up'):.0f} KB"
-        assert _kb(reqs, "down") <= 10, f"one tick downloaded {_kb(reqs, 'down'):.0f} KB"
+        assert d["requests"] <= 10, f"{d['requests']} callback requests for one Next click"
+        assert d["requests"] and d["lastDone"] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert d["up"] / 1000 <= 20, f"one Next click uploaded {d['up'] / 1000:.0f} KB"
+        assert d["down"] / 1000 <= 20, f"one Next click downloaded {d['down'] / 1000:.0f} KB"
+
+    def test_checkbox_tick_settles_quickly(self, open_app, tater_large):
+        page = self._start(open_app, tater_large)
+
+        clicked = time.time()
+        page.click("input[type='checkbox'][value='a']")
+        wait_quiet(page, quiet=1.0)
+        d = dash_counts(page)
+
+        assert d["requests"] <= 6, f"{d['requests']} callback requests for one checkbox tick"
+        assert d["requests"] and d["lastDone"] / 1000 - clicked < 2.0, "callback cascade took too long"
+        assert d["up"] / 1000 <= 10, f"one tick uploaded {d['up'] / 1000:.0f} KB"
+        assert d["down"] / 1000 <= 10, f"one tick downloaded {d['down'] / 1000:.0f} KB"
 
 
 @pytest.mark.perf
@@ -467,163 +418,123 @@ class TestLargeDocumentSet10k(TestLargeDocumentSet):
 # ---------------------------------------------------------------------------
 
 class TestFlagAndNotes:
-    def test_flag_updates_metadata(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        js_click(dash_duo, "#flag-document")
-        time.sleep(0.6)  # wait for auto_save to write
+    def test_flag_updates_metadata(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#flag-document")
+        wait_quiet(page)
 
         saved = read_saved(tater)
         assert saved["doc1"]["metadata"]["flagged"] is True
 
-    def test_unflag_updates_metadata(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        js_click(dash_duo, "#flag-document")
-        time.sleep(0.3)
-        js_click(dash_duo, "#flag-document")
-        time.sleep(0.6)  # wait for auto_save to write
+    def test_unflag_updates_metadata(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#flag-document")
+        wait_quiet(page)
+        page.click("#flag-document")
+        wait_quiet(page)
 
         saved = read_saved(tater)
         assert saved["doc1"]["metadata"]["flagged"] is False
 
-    def test_flag_is_per_document(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        js_click(dash_duo, "#flag-document")
-        time.sleep(0.3)
-
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        time.sleep(0.6)  # wait for auto_save to write
+    def test_flag_is_per_document(self, open_app, tater):
+        page = open_app(tater)
+        page.click("#flag-document")
+        wait_quiet(page)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        wait_quiet(page)
 
         saved = read_saved(tater)
         assert saved["doc1"]["metadata"]["flagged"] is True
         assert saved.get("doc2", {}).get("metadata", {}).get("flagged", False) is False
 
-    def test_notes_update_metadata(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.find_element("#document-notes").send_keys("needs review")
-        time.sleep(0.6)  # wait for auto_save to write
+    def test_notes_update_metadata(self, open_app, tater):
+        page = open_app(tater)
+        page.locator("#document-notes").fill("needs review")
+        wait_quiet(page)
 
         saved = read_saved(tater)
         assert saved["doc1"]["metadata"]["notes"] == "needs review"
 
-    def test_notes_are_per_document(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.find_element("#document-notes").send_keys("doc1 note")
-        time.sleep(0.3)
-
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        time.sleep(0.6)  # wait for auto_save to write
+    def test_notes_are_per_document(self, open_app, tater):
+        page = open_app(tater)
+        page.locator("#document-notes").fill("doc1 note")
+        wait_quiet(page)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        wait_quiet(page)
 
         saved = read_saved(tater)
         assert saved["doc1"]["metadata"]["notes"] == "doc1 note"
         assert saved.get("doc2", {}).get("metadata", {}).get("notes", "") == ""
 
-    def test_notes_field_clears_on_doc_change(self, dash_duo, tater):
-        dash_duo.start_server(tater.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.find_element("#document-notes").send_keys("something")
-        time.sleep(0.2)
-
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-
-        notes = dash_duo.find_element("#document-notes")
-        val = notes.get_attribute("value") or notes.text
-        assert val == ""
+    def test_notes_field_clears_on_doc_change(self, open_app, tater):
+        page = open_app(tater)
+        page.locator("#document-notes").fill("something")
+        wait_quiet(page)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        expect(page.locator("#document-notes")).to_have_value("")
 
 
 # ---------------------------------------------------------------------------
 # Annotation persistence
 # ---------------------------------------------------------------------------
 
+def _radio(page: Page, value: str):
+    return page.locator(f"input[type='radio'][value='{value}']")
+
+
 class TestAnnotationPersistence:
-    def test_annotation_survives_navigation(self, dash_duo, tater_required):
+    def test_annotation_survives_navigation(self, open_app, tater_required):
         """Select a value, navigate away and back — loadValues restores it."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        page = open_app(tater_required)
+        _radio(page, "positive").check()
 
-        # Select "positive"
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.click("#btn-prev")
+        expect(_title(page)).to_have_text("1 / 3")
 
-        # Navigate to doc 2 then back to doc 1
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "#btn-prev")
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        # loadValues restores the annotation clientside
+        expect(_radio(page, "positive")).to_be_checked()
 
-        # loadValues restores the annotation clientside — wait for the checked input
-        dash_duo.wait_for_element("input[type='radio'][value='positive']:checked")
-
-    def test_status_goes_complete_on_departure_with_required_field_filled(self, dash_duo, tater_required):
+    def test_status_goes_complete_on_departure_with_required_field_filled(self, open_app, tater_required):
         """Filling the required fields keeps the current doc In Progress; it becomes
         Complete when the user navigates away (completion is assigned on departure)."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        # Wait for on_doc_change (server callback) to settle — it writes visited=True to
-        # metadata-store, which update_status_from_annotations depends on via State.
-        # Without this, the status callback may read stale metadata and compute "not_started".
-        time.sleep(0.5)
+        # open_app waits for on_doc_change (server callback) to settle: it writes
+        # visited=True to metadata-store, which update_status_from_annotations reads as
+        # State. Without that wait the status callback may compute "not_started".
+        page = open_app(tater_required)
+        _radio(page, "positive").check()
+        expect(page.locator("#status-badge")).to_have_text("IN PROGRESS", use_inner_text=True)
 
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
-        dash_duo.wait_for_text_to_equal("#status-badge", "IN PROGRESS")
-
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        time.sleep(0.3)
-        options = search_document_select(dash_duo, "")
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        wait_quiet(page)
+        options = search_document_select(page, "")
         assert options[0].startswith("1. Doc One")
         assert "COMPLETE" in options[0].upper()
 
-    def test_annotation_persists_to_file(self, dash_duo, tater_required):
+    def test_annotation_persists_to_file(self, open_app, tater_required):
         """Annotation written by captureValue reaches disk via auto_save."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='negative']"),
-        )
-        time.sleep(0.8)  # wait for auto_save
+        page = open_app(tater_required)
+        _radio(page, "negative").check()
+        wait_quiet(page)
 
         saved = read_saved(tater_required)
         assert saved["doc1"]["annotations"]["label"] == "negative"
 
-    def test_different_docs_have_independent_annotations(self, dash_duo, tater_required):
+    def test_different_docs_have_independent_annotations(self, open_app, tater_required):
         """Annotations for each document are stored independently."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        page = open_app(tater_required)
+        _radio(page, "positive").check()
 
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
-
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='negative']"),
-        )
-        time.sleep(0.8)  # wait for auto_save
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        wait_quiet(page)
+        _radio(page, "negative").check()
+        wait_quiet(page)
 
         saved = read_saved(tater_required)
         assert saved["doc1"]["annotations"]["label"] == "positive"
@@ -635,33 +546,24 @@ class TestAnnotationPersistence:
 # ---------------------------------------------------------------------------
 
 class TestAutoAdvance:
-    def test_selecting_value_advances_to_next_doc(self, dash_duo, tater_auto_advance):
+    def test_selecting_value_advances_to_next_doc(self, open_app, tater_auto_advance):
         """Selecting a value on an auto_advance widget advances to the next document."""
-        dash_duo.start_server(tater_auto_advance.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        page = open_app(tater_auto_advance)
+        _radio(page, "positive").click()  # not check(): the next document's radio is unchecked
+        expect(_title(page)).to_have_text("2 / 3")
 
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-
-    def test_auto_advance_does_not_advance_past_last_doc(self, dash_duo, tater_auto_advance):
+    def test_auto_advance_does_not_advance_past_last_doc(self, open_app, tater_auto_advance):
         """Selecting a value on the last document does not navigate further."""
-        dash_duo.start_server(tater_auto_advance.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
+        page = open_app(tater_auto_advance)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("3 / 3")
+        wait_quiet(page)
 
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "3 / 3")
-
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
-        time.sleep(0.5)
-        assert dash_duo.find_element("#document-title").text == "3 / 3"
+        _radio(page, "positive").click()
+        wait_quiet(page)
+        assert _title(page).inner_text() == "3 / 3"
 
 
 # ---------------------------------------------------------------------------
@@ -669,25 +571,17 @@ class TestAutoAdvance:
 # ---------------------------------------------------------------------------
 
 class TestSaveRestore:
-    def test_annotations_restored_on_reload(self, dash_duo, tater_required, docs_file, tmp_path):
+    def test_annotations_restored_on_reload(self, open_app, tater_required, docs_file):
         """Annotations written during a session are loaded by a new TaterApp instance."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='uncertain']"),
-        )
-        time.sleep(0.8)  # wait for auto_save
+        page = open_app(tater_required)
+        _radio(page, "uncertain").check()
+        wait_quiet(page)
 
         # Verify the file was written before creating the new app
         saved = read_saved(tater_required)
         assert saved["doc1"]["annotations"]["label"] == "uncertain"
 
         # New TaterApp loading from the same annotations file
-        from tater.ui.tater_app import TaterApp
-        from tater.widgets import RadioGroupWidget
-
         app2 = TaterApp(
             title="Reload Test",
             schema_model=SimpleSchema,
@@ -701,50 +595,44 @@ class TestSaveRestore:
         assert "doc1" in app2.annotations
         assert app2.annotations["doc1"].label == "uncertain"
 
-    def test_page_refresh_keeps_annotations(self, dash_duo, tater_required):
+    def test_page_refresh_keeps_annotations(self, open_app, tater_required):
         """A browser refresh shows the latest annotations and document, and doesn't overwrite the file.
 
         The layout used to be built once at startup, so a refresh brought back the
         startup state and the next auto-save wrote it over the saved edits.
         """
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        js_click(dash_duo, "input[type='radio'][value='uncertain']")
-        time.sleep(0.8)  # wait for auto_save
+        page = open_app(tater_required)
+        _radio(page, "uncertain").check()
+        wait_quiet(page)
         assert read_saved(tater_required)["doc1"]["annotations"]["label"] == "uncertain"
 
-        dash_duo.driver.refresh()
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-        time.sleep(0.8)  # page-load callbacks and any auto_save they trigger
-        assert dash_duo.find_element("input[type='radio'][value='uncertain']").is_selected()
+        page.reload()
+        settle(page)  # page-load callbacks and any auto_save they trigger
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(_radio(page, "uncertain")).to_be_checked()
 
-        js_click(dash_duo, "#btn-next")
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        js_click(dash_duo, "input[type='radio'][value='positive']")
-        time.sleep(0.8)
+        page.click("#btn-next")
+        expect(_title(page)).to_have_text("2 / 3")
+        wait_quiet(page)
+        _radio(page, "positive").check()
+        wait_quiet(page)
 
         saved = read_saved(tater_required)
         assert saved["doc1"]["annotations"]["label"] == "uncertain"
         assert saved["doc2"]["annotations"]["label"] == "positive"
 
         # A refresh reopens the document the user was on, not the first one.
-        dash_duo.driver.refresh()
-        dash_duo.wait_for_text_to_equal("#document-title", "2 / 3")
-        assert dash_duo.find_element("input[type='radio'][value='positive']").is_selected()
+        page.reload()
+        settle(page)
+        expect(_title(page)).to_have_text("2 / 3")
+        expect(_radio(page, "positive")).to_be_checked()
 
-    def test_no_restore_skips_loading(self, dash_duo, tater_required, docs_file, tmp_path):
+    def test_no_restore_skips_loading(self, open_app, tater_required, docs_file):
         """--no-restore (restore_annotations=False) means prior annotations are ignored."""
-        dash_duo.start_server(tater_required.app)
-        dash_duo.wait_for_text_to_equal("#document-title", "1 / 3")
-
-        dash_duo.driver.execute_script(
-            "arguments[0].click();",
-            dash_duo.find_element("input[type='radio'][value='positive']"),
-        )
-        time.sleep(0.8)
-
-        from tater.ui.tater_app import TaterApp
-        from tater.widgets import RadioGroupWidget
+        page = open_app(tater_required)
+        _radio(page, "positive").check()
+        wait_quiet(page)
+        tater_required.flush_saves()
 
         app2 = TaterApp(
             title="No Restore Test",

@@ -19,8 +19,9 @@ from pathlib import Path
 from playwright.sync_api import Browser, sync_playwright
 
 from perf import bench_server
-from perf.actions import Scenario, make_actions, wait_loaded
-from perf.measure import INIT_SCRIPT, ActionRecorder, ActionResult
+from perf.actions import Scenario, make_actions
+from perf.browser import INIT_SCRIPT, wait_loaded
+from perf.measure import ActionRecorder, ActionResult
 from perf.server import run_tater
 from perf.synthetic import LENGTHS, make_project, write_project
 

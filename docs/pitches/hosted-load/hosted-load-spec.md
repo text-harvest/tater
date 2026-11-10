@@ -15,6 +15,18 @@ The committed baseline (2026-11-03, during #108) has 47 MB per extra 10,000-docu
 
 `bench_server._hosted_case` gains `distinct: bool = False`: when true, session k is built from `make_project(..., seed=k)` rather than one shared project. Flag `--distinct`. Run once at 10,000 realistic to confirm the per-session cost matches.
 
+**Results (2026-11-10, `dev` at 8a66675, filled, 2 spans per document):**
+
+| N | schema | 1 session MB | 5 sessions MB | 20 sessions MB | per extra session MB |
+|---:|---|---:|---:|---:|---:|
+| 500 | checkbox | 47.6 | 51.9 | 68.0 | 1.1 |
+| 10,000 | checkbox | 67.8 | 155 | 480 | 21.7 |
+| 500 | realistic | 48.9 | 58.3 | 94.1 | 2.4 |
+| 10,000 | realistic | 92.9 | 281 | 985 | 47.0 |
+| 10,000 | realistic, distinct projects | 93.1 | 307 | 1,104 | 53.2 |
+
+The same as the 2026-11-03 baseline: #108 didn't change memory per session. Distinct projects cost 13% more, because the shared case hands every session the same document objects, so text is shared. Real hosted sessions each parse their own upload and share nothing, so **53 MB per 10,000-document realistic session** is the figure to plan with. Since the load test uploads for real, it measures the unshared cost, and there's no separate same-vs-different scenario. At that rate 20 such sessions add about 1.1 GB on top of the ~120 MB base, so the target's memory half needs about a 1.5–2 GB instance. A 512 MB instance holds about seven.
+
 ## Step 2: the load test — `perf/load.py` (new)
 
 ```

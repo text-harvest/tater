@@ -50,6 +50,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Arrow key handler
     document.addEventListener('keydown', function (e) {
+        // A focused control already used the key, e.g. a slider thumb moving with the
+        // arrow keys (a div, so the check below doesn't catch it).
+        if (e.defaultPrevented) {
+            return;
+        }
         // Don't intercept when the user is typing in an input or textarea
         const tag = document.activeElement && document.activeElement.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || (document.activeElement && document.activeElement.isContentEditable)) {

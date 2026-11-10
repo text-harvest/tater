@@ -269,6 +269,45 @@ class TestNavigation:
 
 
 # ---------------------------------------------------------------------------
+# Keyboard shortcuts (keyboard.js)
+# ---------------------------------------------------------------------------
+
+class SliderSchema(BaseModel):
+    score: Optional[int] = None
+
+
+@pytest.fixture
+def tater_slider(tmp_path, docs_file):
+    app = TaterApp(title="Slider", schema_model=SliderSchema, annotations_path=str(tmp_path / "ann_slider.json"))
+    app.load_documents(docs_file)
+    app.set_annotation_widgets([SliderWidget("score", label="Score", min_value=0, max_value=10, step=1)])
+    yield app
+    app.flush_saves()
+
+
+class TestKeyboard:
+    def test_arrow_keys_navigate(self, open_app, tater_slider):
+        page = open_app(tater_slider)
+        page.keyboard.press("ArrowRight")
+        expect(_title(page)).to_have_text("2 / 3")
+        page.keyboard.press("ArrowLeft")
+        expect(_title(page)).to_have_text("1 / 3")
+
+    def test_arrow_keys_on_slider_move_it(self, open_app, tater_slider):
+        """Arrow keys on a focused slider thumb change its value, not the document.
+        The thumb is a div, so keyboard.js used to take them as Prev/Next."""
+        page = open_app(tater_slider)
+        thumb = page.locator("[role=slider]")
+        thumb.focus()
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("ArrowRight")
+        wait_quiet(page)
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(thumb).to_have_attribute("aria-valuenow", "2")
+        assert read_saved(tater_slider)["doc1"]["annotations"]["score"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Document selector
 # ---------------------------------------------------------------------------
 
@@ -800,13 +839,11 @@ def _pills(loc) -> list:
         ".map(p => p.textContent)")
 
 
-def _drag_to(page: Page, thumb, track, frac: float) -> None:
-    track.scroll_into_view_if_needed()
-    t, b = thumb.bounding_box(), track.bounding_box()
-    page.mouse.move(t["x"] + t["width"] / 2, t["y"] + t["height"] / 2)
-    page.mouse.down()
-    page.mouse.move(b["x"] + b["width"] * frac, t["y"] + t["height"] / 2, steps=10)
-    page.mouse.up()
+def _press_on(page: Page, target, key: str, times: int) -> None:
+    """Focus ``target`` (e.g. a slider thumb) and press ``key`` ``times`` times."""
+    target.focus()
+    for _ in range(times):
+        page.keyboard.press(key)
 
 
 def _select_text(page: Page, word: str) -> None:
@@ -853,11 +890,9 @@ def fill_all(page: Page) -> None:
     step(lambda: _ctl(page, "switch").click(force=True))
     step(lambda: _ctl(page, "chip").locator("xpath=..").locator("label").click())  # the input is hidden
     step(lambda: _ctl(page, "number").fill("7"))
-    # Sliders by mouse: keyboard.js takes ArrowLeft/Right on a focused thumb as Prev/Next.
-    slider = _ctl(page, "slider")
-    step(lambda: _drag_to(page, slider.locator("[role=slider]"), slider, 0.3))
-    rng = _ctl(page, "range_slider")
-    step(lambda: _drag_to(page, rng.locator("[role=slider]").nth(1), rng, 0.6))
+    # Sliders by keyboard, as on the thumb these keys must not also go to Prev/Next.
+    step(lambda: _press_on(page, _ctl(page, "slider").locator("[role=slider]"), "ArrowRight", 3))
+    step(lambda: _press_on(page, _ctl(page, "range_slider").locator("[role=slider]").nth(1), "ArrowLeft", 4))
     step(lambda: _ctl(page, "text").fill("hello"))
     step(lambda: _ctl(page, "textarea").fill("two words"))
     _select_text(page, "charlie")

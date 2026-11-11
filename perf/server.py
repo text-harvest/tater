@@ -1,4 +1,5 @@
 """Start the tater CLI in a subprocess, so its memory can be measured and it runs as in real use."""
+import os
 import socket
 import subprocess
 import sys
@@ -32,12 +33,17 @@ def run_tater(
     hosted: bool = False,
     trace_path: str | Path | None = None,
     timeout: float = 300.0,
+    env: Optional[dict] = None,
+    limit: Optional[tuple[int, float]] = None,
 ) -> Iterator[ServerInfo]:
     """Run tater on a free port with the project in ``directory`` (see synthetic.write_project).
 
-    Yields once ``/`` responds. Server output goes to ``directory/server.log``.
+    Yields once ``/`` responds. Server output goes to ``directory/server.log``. ``env`` is
+    added to the server's environment. ``limit`` = (memory MB, CPU fraction) runs it under
+    ``systemd-run --user --scope`` with those limits, as on a container instance.
     """
     directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     port = _free_port()
     if hosted:
         args = ["--hosted"]
@@ -55,12 +61,18 @@ def run_tater(
 
     url = f"http://127.0.0.1:{port}"
     with open(directory / "server.log", "w") as log:
-        proc = subprocess.Popen([sys.executable, "-c", _RUN_TATER, *args], stdout=log, stderr=subprocess.STDOUT)
+        cmd = [sys.executable, "-c", _RUN_TATER, *args]
+        if limit:
+            memory_mb, cpu = limit
+            cmd = ["systemd-run", "--user", "--scope", "-q", "-p", f"MemoryMax={memory_mb}M",
+                   "-p", f"CPUQuota={round(cpu * 100)}%", *cmd]
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})
         try:
             deadline = time.time() + timeout
             while True:
                 if proc.poll() is not None:
-                    raise RuntimeError(f"tater exited with {proc.returncode}; see {directory / 'server.log'}")
+                    hint = " (systemd-run limits unavailable here? run without --limit)" if limit else ""
+                    raise RuntimeError(f"tater exited with {proc.returncode}{hint}; see {directory / 'server.log'}")
                 try:
                     urllib.request.urlopen(url + "/", timeout=5)
                     break

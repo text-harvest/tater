@@ -344,15 +344,19 @@ def _stats(values: list[float]) -> dict:
 
 def run_users(recording: Recording, server: ServerInfo, n_users: int, mode: str, duration: float,
               stagger: float = USER_STAGGER_S, browser=None, project_dir: Optional[Path] = None,
-              sampler: Optional[Sampler] = None) -> tuple[list[ActionTiming], dict, list[SimulatedUser], float]:
+              sampler: Optional[Sampler] = None,
+              idle: frozenset = frozenset()) -> tuple[list[ActionTiming], dict, list[SimulatedUser], float]:
     """Run n_users simulated users (and, with ``browser``, the probe) until ``duration`` is up.
+    Users whose index is in ``idle`` start their session and then do nothing.
     Returns the timings, the probe's settle times, the users, and RSS once all had started."""
     timings: list[ActionTiming] = []
     lock = threading.Lock()
     started = threading.Semaphore(0)
     deadline = time.time() + duration
     barrier = threading.Barrier(n_users) if mode == "burst" and n_users > 1 else None
-    users = [SimulatedUser(k, recording, server.url, mode, deadline, timings, lock, barrier, started)
+    start_only = Recording(recording.size, recording.schema, recording.sha, recording.actions[:1])
+    users = [SimulatedUser(k, start_only if k in idle else recording, server.url, mode, deadline,
+                           timings, lock, barrier, started)
              for k in range(n_users)]
     # Memory per session: the first session also pays one-time costs (registering the
     # shared callbacks), so with several users count from after the first has started.
@@ -450,23 +454,33 @@ def oneoff_session_start(recording: Recording, work: Path, limit) -> str:
 
 
 LIMIT_STAGGER_S = 10
-LIMIT_DURATION_S = 90   # users 0 and 1 are still working when users 3 and 4 (30 s, 40 s) push them out
+LIMIT_DURATION_S = 90   # users 0 and 1 are still working when users 3 and 4 (30 s, 40 s) arrive
+# Users 2 and 3 start a session and go idle. With room for 3 sessions, user 3's arrival
+# should push out idle user 2 and user 4's idle user 3; users 0, 1 and 4, who keep
+# working, should see no errors. (Oldest-first eviction dropped users 0 and 1.)
+LIMIT_IDLE = frozenset({2, 3})
 
 
 def oneoff_session_limit(recording: Recording, work: Path, limit) -> str:
-    """TATER_SESSION_CACHE_MAX=3, five users 10 s apart: who gets dropped, and memory after."""
+    """TATER_SESSION_CACHE_MAX=3, five users 10 s apart, two of them idle: is anyone working dropped?"""
     with run_tater(work / "oneoff-limit", hosted=True, limit=limit, env={"TATER_SESSION_CACHE_MAX": "3"}) as server:
         sampler = Sampler(server.pid)
         sampler.start()
         rss_start = sampler.rss()
-        _, _, users, _ = run_users(recording, server, 5, "steady", duration=LIMIT_DURATION_S, stagger=LIMIT_STAGGER_S)
+        _, _, users, _ = run_users(recording, server, 5, "steady", duration=LIMIT_DURATION_S,
+                                   stagger=LIMIT_STAGGER_S, idle=LIMIT_IDLE)
         rss_end = sampler.rss()
         start_only = Recording(recording.size, recording.schema, recording.sha, recording.actions[:1])
         run_users(start_only, server, 3, "steady", duration=0, stagger=0)
         rss_after = sampler.rss()
         sampler.stopping.set()
-    lines = [f"### Session limit (cache of 3, 5 users 10 s apart), {recording.size:,} documents", ""]
-    lines += [f"- user {u.k}: " + (f"first error at {u.first_error}" if u.first_error else "no errors") for u in users]
+    lines = [f"### Session limit (cache of 3, 5 users 10 s apart, users "
+             f"{' and '.join(str(k) for k in sorted(LIMIT_IDLE))} idle after starting), {recording.size:,} documents", ""]
+    working = [u for u in users if u.k not in LIMIT_IDLE]
+    dropped = [u.k for u in working if u.first_error]
+    lines += [f"- user {u.k}{' (idle)' if u.k in LIMIT_IDLE else ''}: "
+              + (f"first error at {u.first_error}" if u.first_error else "no errors") for u in users]
+    lines += ["", "Working users dropped: " + (", ".join(map(str, dropped)) if dropped else "none") + "."]
     lines += ["", f"Memory: {rss_start:.0f} MB at start, {rss_end:.0f} MB with 3 sessions after the run, "
                   f"{rss_after:.0f} MB once 3 new sessions had replaced them.", ""]
     return "\n".join(lines) + "\n"

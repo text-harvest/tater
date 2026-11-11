@@ -182,6 +182,10 @@ Each is done in this step if its condition holds, otherwise recorded in the resu
 - *Production server: not needed.* Probe Next p95 was 240 ms at 20 users and 10,000 documents (target 500 ms); 20 simultaneous Nexts took 282 ms p95 on the server.
 - *Memory after sessions end* doesn't return to the OS (271 → 314 MB once 3 new sessions replaced 3). Noted only, as planned.
 
+**Session-limit scenario, corrected.** As first written it put five users who were all working into room for three, so two were always dropped whatever the eviction order (oldest-first dropped 0 and 1; least recently used dropped 0 and 3). Now users 2 and 3 start a session and go idle (`LIMIT_IDLE`), so the check is whether anyone *working* is dropped: oldest-first drops users 0 and 1, least recently used drops only the idle ones.
+
+**After step 3** (`perf/results/load-baseline.md`, 4a55227): working users dropped in the session-limit scenario: none, at 500 and 10,000 documents. 20 users at 10,000 documents, steady: probe Next p95 338 ms, peak RSS 840 MB (needs about a 1.5 GB instance). Timings are 20–40% above the first run's, single-user scenarios included, so mostly a busier machine; one intermediate run's 2.2 s probe Next p95 (6 samples) didn't recur in two re-runs.
+
 After the fixes, re-run step 2 and commit the results as `perf/results/load-baseline.*`.
 
 ## Step 4: what a hosting platform has to provide

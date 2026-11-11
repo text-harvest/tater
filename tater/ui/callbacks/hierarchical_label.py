@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 from dash import Input, Output, State, ALL, MATCH, ctx, no_update, ClientsideFunction
 
 from tater.ui import value_helpers
-from tater.ui.callbacks.helpers import _get_ann, _slice_stores
+from tater.ui.callbacks.helpers import _get_ann, _slice_stores, session_resolver
 from tater.widgets.base import ContainerWidget
 from tater.widgets.hierarchical_label import (
     HierarchicalLabelWidget,
@@ -64,14 +64,7 @@ def _find_hl_template(widgets: list, field_path: str):
 def setup_hl_select_callbacks(tater_app: TaterApp) -> None:
     """Register MATCH callbacks for all HierarchicalLabelSelectWidget instances."""
     app = tater_app.app
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     def _get_widget(field_path: str) -> Optional[HierarchicalLabelSelectWidget]:
         w = _find_hl_template(_ta().widgets, field_path)
@@ -157,14 +150,7 @@ def setup_hl_browser_callback(tater_app: TaterApp) -> None:
 def setup_hl_multi_callbacks(tater_app: TaterApp) -> None:
     """Register MATCH callbacks for all HierarchicalLabelMultiWidget instances."""
     app = tater_app.app
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     def _get_widget(field_path: str) -> Optional[HierarchicalLabelMultiWidget]:
         w = _find_hl_template(_ta().widgets, field_path)

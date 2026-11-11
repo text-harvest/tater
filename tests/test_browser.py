@@ -1189,3 +1189,58 @@ class TestHosted:
     def test_no_errors(self, hosted_run):
         """No JS errors and no failed callback requests in either session."""
         assert hosted_run["errors"] == {"A": [], "B": []}
+
+
+# ---------------------------------------------------------------------------
+# Hosted mode: a tab whose session has ended never reaches another session
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def hosted_server_one_session(tmp_path_factory, request):
+    """``tater --hosted`` keeping only the most recent session."""
+    directory = tmp_path_factory.mktemp("hosted-one")
+    failed_before = request.session.testsfailed
+    with run_tater(directory, hosted=True, env={"TATER_SESSION_CACHE_MAX": "1"}) as server:
+        yield server
+    log = directory / "server.log"
+    if request.session.testsfailed > failed_before and log.exists():
+        print("--- server.log (end)\n" + log.read_text()[-3000:])
+
+
+class TestHostedEndedSession:
+    def test_ended_session_does_not_reach_first_session(
+        self, browser, browser_context_args, hosted_server_one_session
+    ):
+        """Callbacks are registered by the first session's TaterApp. A request from a
+        session that has gone used to fall back to it: B's Next showed A's documents,
+        from another project, and B's edits changed A's copy. Now it changes nothing."""
+        contexts = []
+
+        def open_session(example: str) -> Session:
+            ctx = browser.new_context(**browser_context_args)
+            ctx.add_init_script(INIT_SCRIPT)
+            contexts.append(ctx)
+            return Session(ctx, hosted_server_one_session, example)
+
+        try:
+            a = open_session("simple")       # registers the callbacks
+            a_text = a.page.locator("#document-content").inner_text()
+            b = open_session("coarse_breast_label")  # another project; evicts A
+            open_session("simple")           # evicts B; B's tab stays open
+            b_text = b.page.locator("#document-content").inner_text()
+            b_pos = position(b.page)
+            assert b_text != a_text
+
+            b.page.locator("#btn-next").click()
+            wait_quiet(b.page)
+            b.page.wait_for_timeout(500)
+
+            assert b.page.locator("#document-content").inner_text() == b_text
+            assert position(b.page) == b_pos
+            assert b.errors == []
+
+            b.page.reload()  # the session is gone: back to the upload page
+            expect(b.page.get_by_text("Browse examples")).to_be_visible()
+        finally:
+            for ctx in contexts:
+                ctx.close()

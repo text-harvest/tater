@@ -296,3 +296,31 @@ def test_cache_below_max_no_eviction():
         if len(cache) > max_size:
             cache.popitem(last=False)
     assert len(cache) == 5
+
+
+# ---------------------------------------------------------------------------
+# session_resolver: which TaterApp a callback acts on
+# ---------------------------------------------------------------------------
+
+class TestSessionResolver:
+    def _app(self, get_current=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(_get_current_app=get_current)
+
+    def test_single_mode_returns_own_app(self):
+        from tater.ui.callbacks.helpers import session_resolver
+        app = self._app()
+        assert session_resolver(app)() is app
+
+    def test_hosted_returns_callers_session(self):
+        from tater.ui.callbacks.helpers import session_resolver
+        other = object()
+        assert session_resolver(self._app(lambda: other))() is other
+
+    def test_hosted_ended_session_never_falls_back(self):
+        """The registering (first) session must not stand in for a session that has gone."""
+        from dash.exceptions import PreventUpdate
+        from tater.ui.callbacks.helpers import session_resolver
+        ta = session_resolver(self._app(lambda: None))
+        with pytest.raises(PreventUpdate):
+            ta()

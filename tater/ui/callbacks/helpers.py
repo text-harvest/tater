@@ -1,10 +1,12 @@
 """Shared utilities used across all callback modules."""
 from __future__ import annotations
 
+import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from dash import Patch, html, no_update
+from dash.exceptions import PreventUpdate
 from tater.ui import value_helpers
 from tater.ui.constants import STATUS_COLORS, STATUS_LABELS
 from tater.widgets.base import ContainerWidget, ControlWidget
@@ -14,6 +16,42 @@ from tater.widgets.repeater import RepeaterWidget
 if TYPE_CHECKING:
     from tater.ui.tater_app import TaterApp
     from tater.widgets.base import TaterWidget
+
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Session resolution
+# ---------------------------------------------------------------------------
+
+def session_resolver(tater_app: TaterApp) -> Callable[[], TaterApp]:
+    """Return ``_ta()``: the TaterApp a callback request should act on.
+
+    Single mode: always *tater_app*. Hosted mode: the calling user's session,
+    looked up from the Flask session cookie on each request. Callbacks are
+    registered once, by the first session's TaterApp, so *tater_app* here is
+    that session; falling back to it would show one user another user's
+    documents and apply their edits to it. When the caller's session is gone
+    (evicted, or the server restarted under an open tab), ``_ta()`` raises
+    ``PreventUpdate`` instead, so the request reads and changes nothing. The
+    browser still holds the user's annotations, and Download doesn't need the
+    session.
+
+    Call ``_ta()`` only inside callback bodies, never at registration.
+    """
+    get_current = tater_app._get_current_app
+    if get_current is None:
+        return lambda: tater_app
+
+    def _ta() -> TaterApp:
+        current = get_current()
+        if current is None:
+            logger.warning("tater: callback for a hosted session that has ended; ignored")
+            raise PreventUpdate
+        return current
+
+    return _ta
 
 
 # ---------------------------------------------------------------------------

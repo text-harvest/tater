@@ -228,10 +228,15 @@ parsed inline with `yaml.safe_load`, and injected directly into the schema dict 
 
 **Always-register callbacks:** span, repeater, nested-repeater, hierarchical-label-select, and
 hierarchical-label-multi callbacks are registered once at server startup (not per-session).
-They use a `_ta()` runtime resolver — `app._tater_get_current_app` is a function stored on
-the Dash app that looks up the calling user's `TaterApp` from `_session_cache` via
-`flask.session` at callback invocation time. This avoids re-registering callbacks for each
-upload session (Dash only allows each output to be registered once).
+They use a `_ta()` runtime resolver from `session_resolver(tater_app)` (`callbacks/helpers.py`) —
+`app._tater_get_current_app` is a function stored on the Dash app that looks up the calling
+user's `TaterApp` from `_session_cache` via `flask.session` at callback invocation time. This
+avoids re-registering callbacks for each upload session (Dash only allows each output to be
+registered once). The callbacks are registered by the *first* session's `TaterApp`, so in hosted
+mode `_ta()` must never fall back to the `tater_app` it was built from: when the caller's session
+is gone (evicted, or a tab left open across a restart) it raises `PreventUpdate`. A fallback
+showed one user another user's documents and applied their edits to them (#115). Use
+`session_resolver` for any new session-aware callback, and call `_ta()` only inside callback bodies.
 
 **`_tater_app` vs `_tater_get_current_app`:** two different mechanisms are used to give
 callbacks access to the right `TaterApp` instance, depending on mode:
@@ -508,9 +513,9 @@ import `perf.synthetic`).
 - `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
-- `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
+- `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction, `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
-- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors)
+- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) and `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents)
 
 **Browser test setup:** Playwright's Chromium, installed once with `uv run playwright install
 chromium` (no Chrome or ChromeDriver; the tests run in a Claude Code sandbox). pytest-playwright

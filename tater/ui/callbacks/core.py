@@ -23,6 +23,7 @@ from tater.ui.callbacks.helpers import (
     _status_display,
     _is_complete_eligible,
     _format_seconds,
+    session_resolver,
 )
 
 if TYPE_CHECKING:
@@ -38,14 +39,7 @@ def setup_callbacks(tater_app: TaterApp) -> None:
     # In hosted mode, each HTTP request carries a Flask session cookie identifying
     # the user's session. _ta() resolves the correct TaterApp for that session so
     # callbacks work correctly when multiple users share the same Dash process.
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     # Scroll to top on document navigation.
     app.clientside_callback(
@@ -842,14 +836,7 @@ def setup_value_capture_callbacks(tater_app: TaterApp) -> None:
     """Setup unified callbacks to capture all ControlWidget value changes."""
     app = tater_app.app
 
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     # --- Clientside capture: value prop (all non-boolean ControlWidgets) ---
     # Runs in the browser so annotations-store is always current — no stale-State

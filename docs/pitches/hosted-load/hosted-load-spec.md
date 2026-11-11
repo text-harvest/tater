@@ -155,7 +155,11 @@ All methods hold one `threading.Lock`: the server is threaded, and `get` (every 
 
 `serve_layout`'s cache-miss branch (cookie present, session gone) passes `notice=` to `build_upload_layout`, which shows it as a `dmc.Alert` (color "yellow") above the tabs: "Your annotation session has ended, because the server restarted or had too many sessions. Annotations you hadn't downloaded are lost." `build_upload_layout(show_disclaimer, notice=None)`; no notice on a first visit.
 
-Callbacks that arrive for a session that has gone (the page is still open) fail as now; the replay counts them. Making the open page notice is left for later unless the session-limit results show it matters.
+Callbacks that arrive for a session that has gone (the page is still open) change nothing: `_ta()` raises `PreventUpdate` (204), and the replay counts them as status mismatches. Making the open page notice is left for later unless the session-limit results show it matters.
+
+### Done: a session that has gone never reaches another session
+
+Found while building step 2. Every `_ta()` resolver (seven copies in `callbacks/core.py`, `repeater.py`, `hierarchical_label.py`) fell back to the `tater_app` it was built from — the first session after server start, since that session registers the shared callbacks — when the caller's session wasn't in the cache. After an eviction, or with a tab left open across a restart, the user's Next showed the first session's documents (another user's, possibly another project) and their edits went into that session's server copy. The seven copies are replaced by `session_resolver(tater_app)` in `callbacks/helpers.py`, which in hosted mode raises `PreventUpdate` instead. Download reads only the browser's stores, so a user whose session has gone can still download their work. Tests: `TestSessionResolver` in `tests/test_hosted_mode.py`; `TestHostedEndedSession` in `tests/test_browser.py` (cache limit 1; A, then B on another project, then C; B's open tab clicks Next and nothing changes — on the old code it showed A's document).
 
 ### Browser test — `TestHostedEviction` in `tests/test_browser.py`
 

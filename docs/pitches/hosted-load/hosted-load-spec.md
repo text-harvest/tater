@@ -142,9 +142,10 @@ New class `SessionCache` in `tater/ui/runner.py`, replacing the bare `OrderedDic
 
 ```python
 class SessionCache:
-    def __init__(self, max_size: int): ...
-    def get(self, session_id: str) -> TaterApp | None     # moves the hit to the end (most recent)
-    def add(self, session_id: str, app: TaterApp) -> None # evicts least recently used past max_size
+    def __init__(self, max_size: int, max_docs: int = 0): ...
+    def get(self, session_id: str) -> TaterApp | None          # moves the hit to the end (most recent)
+    def add(self, session_id: str, app: TaterApp) -> list[str] # evicts least recently used past either limit; returns evicted ids
+    total_docs: int                                            # property
     def __contains__(self, session_id) -> bool
     def __len__(self) -> int
 ```
@@ -174,6 +175,12 @@ Each is done in this step if its condition holds, otherwise recorded in the resu
 
 - **Limit by size, not count** — if 20 sessions at 10,000 documents exceed the instance by more than the per-session cost of a small project explains. Add `TATER_SESSION_DOCS_MAX` (total documents across cached sessions); `SessionCache.add` evicts least recently used until under both limits. Documents are a cheap proxy for memory; the results give the MB per document to choose it with.
 - **Production server** — if probe `next` p95 misses the target while `cpu_peak_pct` stays under 80% of the available CPU (the server waits rather than computes). Then run hosted mode on `waitress` (pure Python, one process, threads, so sessions keep working) behind `--server waitress`, added as an optional dependency, and re-measure.
+
+**Decided from the first full run** (`perf/results/2026-11-11-42db436-load.md`, before step 3):
+
+- *Limit by size: done.* A session costs about 2 MB at 500 documents and 33 MB at 10,000 (53 MB when users upload different projects, step 1), so memory follows documents, not sessions: the default 100 sessions would be 3–5 GB at 10,000 documents. `TATER_SESSION_DOCS_MAX`, default 200,000 (20 sessions of 10,000 documents, about 1.2 GB, in a 1.5–2 GB instance; `0` turns it off). The session just added is never evicted, even if its project alone is over the limit.
+- *Production server: not needed.* Probe Next p95 was 240 ms at 20 users and 10,000 documents (target 500 ms); 20 simultaneous Nexts took 282 ms p95 on the server.
+- *Memory after sessions end* doesn't return to the OS (271 → 314 MB once 3 new sessions replaced 3). Noted only, as planned.
 
 After the fixes, re-run step 2 and commit the results as `perf/results/load-baseline.*`.
 

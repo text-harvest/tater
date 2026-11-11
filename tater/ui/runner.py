@@ -1,7 +1,10 @@
 """Entry point for the ``tater`` CLI command."""
+import logging
 import os
 import signal
 import sys
+import threading
+from collections import OrderedDict
 
 from tater.ui.cli import parse_args
 from tater.ui.tater_app import TaterApp
@@ -13,6 +16,81 @@ def main() -> None:
         run_hosted(args)
     else:
         run_single(args)
+
+
+logger = logging.getLogger(__name__)
+
+# Default limit on documents across all cached hosted sessions. Server memory grows
+# with documents (#115: about 3-5 MB per 1,000 documents per session), so this bounds
+# memory where a session count can't: 20 sessions of 10,000 documents fit, as do
+# many more small ones, in roughly a 1.5-2 GB instance.
+DEFAULT_SESSION_DOCS_MAX = 200_000
+
+
+class SessionCache:
+    """Hosted-mode ``session_id -> TaterApp``, least recently used evicted first.
+
+    Bounded by session count (``max_size``) and by total documents across sessions
+    (``max_docs``; 0 = no document limit). ``get`` counts as use, so a session whose
+    user is working is not the one evicted. The session just added is never evicted,
+    even if its project alone is over ``max_docs``. Thread-safe: the server is threaded,
+    and every callback request calls ``get``.
+    """
+
+    def __init__(self, max_size: int, max_docs: int = 0):
+        self.max_size = max_size
+        self.max_docs = max_docs
+        self._apps: OrderedDict[str, TaterApp] = OrderedDict()
+        self._docs = 0
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _doc_count(app) -> int:
+        return len(getattr(app, "documents", None) or [])
+
+    def get(self, session_id: str):
+        with self._lock:
+            app = self._apps.get(session_id)
+            if app is not None:
+                self._apps.move_to_end(session_id)
+            return app
+
+    def add(self, session_id: str, app) -> list[str]:
+        """Add (or replace) a session; return the session ids evicted to make room."""
+        with self._lock:
+            old = self._apps.pop(session_id, None)
+            if old is not None:
+                self._docs -= self._doc_count(old)
+            self._apps[session_id] = app
+            self._docs += self._doc_count(app)
+            evicted = []
+            while len(self._apps) > 1 and (
+                len(self._apps) > self.max_size
+                or (self.max_docs and self._docs > self.max_docs)
+            ):
+                sid, gone = self._apps.popitem(last=False)
+                self._docs -= self._doc_count(gone)
+                evicted.append(sid)
+            return evicted
+
+    @property
+    def total_docs(self) -> int:
+        with self._lock:
+            return self._docs
+
+    def __contains__(self, session_id) -> bool:
+        with self._lock:
+            return session_id in self._apps
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._apps)
+
+
+SESSION_ENDED_NOTICE = (
+    "Your annotation session has ended, because the server restarted or had too many "
+    "sessions. Annotations you hadn't downloaded are lost."
+)
 
 
 def run_single(args) -> None:
@@ -96,11 +174,13 @@ def run_hosted(args) -> None:
     app.server.secret_key = os.environ.get("TATER_SECRET_KEY") or _random_secret_key()
     _install_trace(app.server, args)
 
-    # Cache: session_id → TaterApp. Callbacks are registered once per session_id.
-    # Oldest entry is evicted when the cache exceeds TATER_SESSION_CACHE_MAX.
-    from collections import OrderedDict
-    _cache_max = int(os.environ.get("TATER_SESSION_CACHE_MAX", 100))
-    _session_cache: OrderedDict[str, object] = OrderedDict()
+    # Cache: session_id → TaterApp. The least recently used session is evicted when
+    # there are more than TATER_SESSION_CACHE_MAX sessions or more than
+    # TATER_SESSION_DOCS_MAX documents across them.
+    _session_cache = SessionCache(
+        max_size=int(os.environ.get("TATER_SESSION_CACHE_MAX", 100)),
+        max_docs=int(os.environ.get("TATER_SESSION_DOCS_MAX", DEFAULT_SESSION_DOCS_MAX)),
+    )
 
     # Let callbacks look up the current user's TaterApp at runtime via flask.session.
     # Stored on the shared Dash app so TaterApp.__init__ can pick it up.
@@ -132,9 +212,12 @@ def run_hosted(args) -> None:
                 base_dir=session_info.get("base_dir"),
             )
             if tater_app is not None:
-                _session_cache[session_id] = tater_app
-                if len(_session_cache) > _cache_max:
-                    _session_cache.popitem(last=False)
+                evicted = _session_cache.add(session_id, tater_app)
+                if evicted:
+                    logger.info(
+                        "tater: evicted %d session(s) (now %d sessions, %d documents)",
+                        len(evicted), len(_session_cache), _session_cache.total_docs,
+                    )
 
     show_disclaimer = args.show_disclaimer
 
@@ -149,9 +232,9 @@ def run_hosted(args) -> None:
         session_id = session_info.get("session_id", "")
         tater_app = _session_cache.get(session_id)
         if tater_app is None:
-            # Cache lost (server restart) — session data is gone, start over.
+            # Session gone (evicted, or the server restarted): start over, and say so.
             flask.session.pop("tater_session", None)
-            return build_upload_layout(show_disclaimer=show_disclaimer)
+            return build_upload_layout(show_disclaimer=show_disclaimer, notice=SESSION_ENDED_NOTICE)
         return build_annotation_layout(tater_app)
 
     app.layout = serve_layout

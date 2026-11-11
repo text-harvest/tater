@@ -1244,3 +1244,62 @@ class TestHostedEndedSession:
         finally:
             for ctx in contexts:
                 ctx.close()
+
+
+# ---------------------------------------------------------------------------
+# Hosted mode: the least recently used session is evicted, and its user is told
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def hosted_server_two_sessions(tmp_path_factory, request):
+    """``tater --hosted`` keeping two sessions."""
+    directory = tmp_path_factory.mktemp("hosted-two")
+    failed_before = request.session.testsfailed
+    with run_tater(directory, hosted=True, env={"TATER_SESSION_CACHE_MAX": "2"}) as server:
+        yield server
+    log = directory / "server.log"
+    if request.session.testsfailed > failed_before and log.exists():
+        print("--- server.log (end)\n" + log.read_text()[-3000:])
+
+
+@pytest.fixture(scope="class")
+def eviction_run(browser, browser_context_args, hosted_server_two_sessions):
+    """A and B start; A edits (so B is now the least recently used); C starts."""
+    contexts = []
+
+    def open_session() -> Session:
+        ctx = browser.new_context(**browser_context_args)
+        ctx.add_init_script(INIT_SCRIPT)
+        contexts.append(ctx)
+        return Session(ctx, hosted_server_two_sessions, "simple")
+
+    run = {}
+    try:
+        a = open_session()
+        b = open_session()
+        a.page.locator("#document-notes").fill("notes A")
+        wait_quiet(a.page, quiet=0.2)
+        a.page.wait_for_timeout(500)
+        open_session()                         # C: one session has to go
+        a.reload()
+        run["a_notes"] = a.notes()
+        b.page.reload()
+        b.page.wait_for_load_state("networkidle")
+        run["b_upload_page"] = b.page.get_by_text("Browse examples").is_visible()
+        notice = b.page.locator("#session-ended-notice")
+        run["b_notice"] = notice.inner_text() if notice.count() else None
+        run["errors"] = {"A": a.errors}
+        yield run
+    finally:
+        for ctx in contexts:
+            ctx.close()
+
+
+class TestHostedEviction:
+    def test_active_session_is_kept(self, eviction_run):
+        assert eviction_run["a_notes"] == "notes A"
+        assert eviction_run["errors"] == {"A": []}
+
+    def test_ended_session_shows_notice(self, eviction_run):
+        assert eviction_run["b_upload_page"]
+        assert eviction_run["b_notice"] and "session has ended" in eviction_run["b_notice"]

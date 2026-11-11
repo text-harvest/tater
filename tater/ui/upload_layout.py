@@ -136,8 +136,11 @@ def _status_icon(complete: bool, optional: bool = False, size: int = 52) -> dmc.
 # Layout
 # ---------------------------------------------------------------------------
 
-def build_upload_layout(show_disclaimer: bool = False) -> dmc.MantineProvider:
-    """Return the upload page root component."""
+def build_upload_layout(show_disclaimer: bool = False, notice: str | None = None) -> dmc.MantineProvider:
+    """Return the upload page root component.
+
+    ``notice``, if given, is shown above the tabs (e.g. that the user's session has ended).
+    """
     examples = _get_builtin_examples()
 
     upload_tab = dmc.Stack(
@@ -358,6 +361,15 @@ def build_upload_layout(show_disclaimer: bool = False) -> dmc.MantineProvider:
                         dmc.Text(
                             "Document annotation — provide your schema and documents or choose a built-in example.",
                             size="sm", c="dimmed", ta="center",
+                        ),
+                        *(
+                            [dmc.Alert(
+                                notice,
+                                id="session-ended-notice",
+                                color="yellow",
+                                icon=DashIconify(icon="tabler:alert-triangle", width=20),
+                            )]
+                            if notice else []
                         ),
                         dmc.Paper(
                             dmc.Tabs(

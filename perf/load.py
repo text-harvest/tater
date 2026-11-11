@@ -516,7 +516,10 @@ def main(argv=None) -> None:
                     if mode == "burst" and n_users == 1:
                         continue
                     print(f"{size:,} documents, {n_users} users, {mode} ...", flush=True)
-                    with run_tater(work / f"server-{size}-{n_users}-{mode}", hosted=True, limit=limit) as server:
+                    # No document limit: these runs measure every user's session kept at once
+                    # (20 users + the probe at 10,000 documents is over the 200,000 default).
+                    with run_tater(work / f"server-{size}-{n_users}-{mode}", hosted=True, limit=limit,
+                                   env={"TATER_SESSION_DOCS_MAX": "0"}) as server:
                         sampler = Sampler(server.pid)
                         sampler.start()
                         timings, probe, _, per_session = run_users(

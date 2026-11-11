@@ -479,7 +479,7 @@ tater --hosted [options]
 | `--debug` | Enable debug/hot-reload mode |
 | `--show-disclaimer` | Display a disclaimer modal that users must acknowledge before accessing the annotation UI (hosted mode only) |
 
-Environment variables: `TATER_APP_PORT`, `TATER_APP_HOST`, `TATER_APP_DEBUG`, `TATER_SECRET_KEY`, `TATER_SESSION_CACHE_MAX` (hosted mode session cache size, default `100`).
+Environment variables: `TATER_APP_PORT`, `TATER_APP_HOST`, `TATER_APP_DEBUG`, `TATER_SECRET_KEY`, `TATER_SESSION_CACHE_MAX` (hosted mode: most sessions kept in memory, default `100`), `TATER_SESSION_DOCS_MAX` (hosted mode: most documents across those sessions, default `200000`; `0` for no limit). When either is exceeded, the least recently used session is dropped and its user is told on their next page load.
 
 ## Jupyter notebooks
 

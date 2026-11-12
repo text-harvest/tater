@@ -404,7 +404,7 @@ uv run python -m perf.trace_report <trace.jsonl>      # per-action table for one
 `perf.run` writes `perf/results/<date>-<sha>.{csv,md}`: per action, requests, bytes up/down, settle time,
 long tasks, the ratio of the largest size to 500, and trace flags (an output fired more than twice,
 a request or response over 100 KB, a 204 that changed nothing). Only `perf/results/baseline.*`
-is committed. The design is in `docs/pitches/scaling/scaling-spec.md`.
+is committed. The design is in the spec linked from [#108](https://github.com/text-harvest/tater/issues/108).
 
 Hosted mode under load (#115): `perf.load` records one real hosted session with Playwright,
 replays it as many simulated users (`requests`, with think time, or `burst` where every Next
@@ -421,8 +421,8 @@ uv run python -m perf.load --sizes 500,10000 --users 1,5,20 --modes steady,burst
 ```
 
 The README's "Deploying hosted mode" turns the results into instance sizes and
-`TATER_SESSION_DOCS_MAX` values; update it when the baseline changes. The design is in
-`docs/pitches/hosted-load/hosted-load-spec.md`.
+`TATER_SESSION_DOCS_MAX` values; update it when the baseline changes. The design is in the
+spec linked from [#115](https://github.com/text-harvest/tater/issues/115).
 
 ## Widget conventions
 

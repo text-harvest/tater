@@ -406,6 +406,24 @@ long tasks, the ratio of the largest size to 500, and trace flags (an output fir
 a request or response over 100 KB, a 204 that changed nothing). Only `perf/results/baseline.*`
 is committed. The design is in `docs/pitches/scaling/scaling-spec.md`.
 
+Hosted mode under load (#115): `perf.load` records one real hosted session with Playwright,
+replays it as many simulated users (`requests`, with think time, or `burst` where every Next
+lands at once) while a probe browser times Next, tick and notes, and samples the server's
+memory and CPU. Plus one-off scenarios: session start, and the session limit (cache of 3, two
+idle users; nobody working may be dropped). It writes `perf/results/<date>-<sha>-load.{csv,md}`;
+`perf/results/load-baseline.*` is committed. The target is 20 annotators on 10,000-document
+projects: probe Next p95 ≤ 500 ms (338 ms in the baseline) and peak memory ≤ 75% of the
+instance (840 MB, so about 1.5 GB). A full run takes about 30 minutes and peaks around 1.5 GB
+on this machine; run it under a memory watchdog.
+
+```bash
+uv run python -m perf.load --sizes 500,10000 --users 1,5,20 --modes steady,burst
+```
+
+The README's "Deploying hosted mode" turns the results into instance sizes and
+`TATER_SESSION_DOCS_MAX` values; update it when the baseline changes. The design is in
+`docs/pitches/hosted-load/hosted-load-spec.md`.
+
 ## Widget conventions
 
 Widget base class hierarchy in `base.py`:
@@ -523,6 +541,7 @@ import `perf.synthetic`).
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, `SessionCache` (least recently used eviction by count and documents, thread safety), `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
+- `test_load.py` — `perf.load` helpers (no server): request dependencies for replay, percentiles and summaries, `Recording` JSON round-trip
 - `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents) and `TestHostedEviction` (the least recently used session is the one evicted; its user gets the session-ended notice)
 
 **Browser test setup:** Playwright's Chromium, installed once with `uv run playwright install

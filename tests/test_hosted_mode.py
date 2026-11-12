@@ -5,17 +5,17 @@ Covers:
     hierarchy file injection, and error cases
   - Schema builder _fields_to_schema -> parse_schema round-trip for all
     supported field types and widget variants
-  - Session cache eviction (OrderedDict FIFO behaviour)
+  - SessionCache: least recently used eviction by count and documents
+  - session_resolver: hosted callbacks never fall back to the first session
 """
 from __future__ import annotations
 
-from collections import OrderedDict
 from typing import Literal, Optional, List
 
 import pytest
 from dash import Dash
 
-from tater.ui.runner import _build_session_app_from_data
+from tater.ui.runner import SessionCache, _build_session_app_from_data
 from tater.ui.schema_builder import _fields_to_schema
 from tater.loaders.json_loader import parse_schema
 
@@ -270,29 +270,118 @@ def test_round_trip_mixed_fields():
 
 
 # ---------------------------------------------------------------------------
-# Session cache eviction
+# SessionCache: least recently used eviction, by count and by documents
 # ---------------------------------------------------------------------------
 
-def test_cache_eviction_drops_oldest():
-    cache: OrderedDict[str, str] = OrderedDict()
-    max_size = 3
-    for i in range(5):
-        cache[f"s{i}"] = f"app{i}"
-        if len(cache) > max_size:
-            cache.popitem(last=False)
-    assert len(cache) == max_size
-    assert "s0" not in cache
-    assert "s1" not in cache
-    assert "s2" in cache
-    assert "s3" in cache
-    assert "s4" in cache
+class _App:
+    def __init__(self, docs: int = 1):
+        self.documents = [object()] * docs
 
 
-def test_cache_below_max_no_eviction():
-    cache: OrderedDict[str, str] = OrderedDict()
-    max_size = 10
-    for i in range(5):
-        cache[f"s{i}"] = f"app{i}"
-        if len(cache) > max_size:
-            cache.popitem(last=False)
-    assert len(cache) == 5
+class TestSessionCache:
+    def test_least_recently_used_goes_first(self):
+        cache = SessionCache(max_size=3)
+        for i in range(5):
+            cache.add(f"s{i}", _App())
+        assert len(cache) == 3
+        assert "s0" not in cache and "s1" not in cache
+        assert all(f"s{i}" in cache for i in (2, 3, 4))
+
+    def test_get_saves_a_session_from_eviction(self):
+        """An annotator who is working (every callback calls get) isn't the one dropped."""
+        cache = SessionCache(max_size=3)
+        for i in range(3):
+            cache.add(f"s{i}", _App())
+        assert cache.get("s0") is not None
+        assert cache.add("s3", _App()) == ["s1"]
+        assert "s0" in cache
+
+    def test_below_limit_nothing_goes(self):
+        cache = SessionCache(max_size=10, max_docs=1000)
+        for i in range(5):
+            assert cache.add(f"s{i}", _App(100)) == []
+        assert len(cache) == 5
+        assert cache.total_docs == 500
+
+    def test_document_limit(self):
+        cache = SessionCache(max_size=100, max_docs=25_000)
+        cache.add("a", _App(10_000))
+        cache.add("b", _App(10_000))
+        assert cache.add("c", _App(10_000)) == ["a"]
+        assert cache.total_docs == 20_000
+        # Many small projects fit where large ones don't.
+        for i in range(10):
+            cache.add(f"small{i}", _App(500))
+        assert "b" in cache and "c" in cache and len(cache) == 12
+
+    def test_new_session_over_document_limit_is_kept_alone(self):
+        cache = SessionCache(max_size=100, max_docs=5_000)
+        cache.add("a", _App(1_000))
+        assert cache.add("big", _App(8_000)) == ["a"]
+        assert "big" in cache and len(cache) == 1
+
+    def test_zero_document_limit_means_none(self):
+        cache = SessionCache(max_size=100, max_docs=0)
+        for i in range(5):
+            cache.add(f"s{i}", _App(1_000_000))
+        assert len(cache) == 5
+
+    def test_re_adding_a_session_replaces_it(self):
+        cache = SessionCache(max_size=3)
+        cache.add("a", _App(10))
+        cache.add("a", _App(20))
+        assert len(cache) == 1 and cache.total_docs == 20
+
+    def test_missing_session(self):
+        assert SessionCache(max_size=3).get("nope") is None
+
+    def test_concurrent_get_and_add_stay_consistent(self):
+        import threading
+        cache = SessionCache(max_size=20, max_docs=2_000)
+        errors = []
+
+        def worker(k):
+            try:
+                for i in range(300):
+                    cache.add(f"w{k}-{i}", _App(50))
+                    cache.get(f"w{k}-{i // 2}")
+                    cache.get(f"w{(k + 1) % 8}-{i}")
+            except Exception as e:  # pragma: no cover - reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert len(cache) <= 20
+        assert cache.total_docs == 50 * len(cache) <= 2_000
+
+
+# ---------------------------------------------------------------------------
+# session_resolver: which TaterApp a callback acts on
+# ---------------------------------------------------------------------------
+
+class TestSessionResolver:
+    def _app(self, get_current=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(_get_current_app=get_current)
+
+    def test_single_mode_returns_own_app(self):
+        from tater.ui.callbacks.helpers import session_resolver
+        app = self._app()
+        assert session_resolver(app)() is app
+
+    def test_hosted_returns_callers_session(self):
+        from tater.ui.callbacks.helpers import session_resolver
+        other = object()
+        assert session_resolver(self._app(lambda: other))() is other
+
+    def test_hosted_ended_session_never_falls_back(self):
+        """The registering (first) session must not stand in for a session that has gone."""
+        from dash.exceptions import PreventUpdate
+        from tater.ui.callbacks.helpers import session_resolver
+        ta = session_resolver(self._app(lambda: None))
+        with pytest.raises(PreventUpdate):
+            ta()

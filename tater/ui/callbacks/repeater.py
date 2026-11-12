@@ -8,7 +8,7 @@ from dash import Input, Output, State, ALL, MATCH, ctx, no_update, ClientsideFun
 from dash.exceptions import PreventUpdate
 
 from tater.ui import value_helpers
-from tater.ui.callbacks.helpers import _get_ann, _slice_stores
+from tater.ui.callbacks.helpers import _get_ann, _slice_stores, session_resolver
 from tater.widgets.base import ContainerWidget, ControlWidget
 from tater.widgets.repeater import (
     RepeaterWidget,
@@ -74,14 +74,7 @@ def _compute_empty_item(widget_template) -> dict | None:
 def setup_repeater_callbacks(tater_app: TaterApp) -> None:
     """Register a single MATCH callback handling all repeaters at every nesting depth."""
     app = tater_app.app
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     # --- Unified MATCH callback ---
     # Uses repeater-ann-relay (MATCH) instead of annotations-store (static) to avoid
@@ -199,14 +192,7 @@ def setup_repeater_callbacks(tater_app: TaterApp) -> None:
 def setup_nested_repeater_callbacks(tater_app: TaterApp) -> None:
     """Register a single generic MATCH callback for all nested repeater instances."""
     app = tater_app.app
-    _get_current_app_fn = tater_app._get_current_app
-
-    def _ta() -> TaterApp:
-        if _get_current_app_fn is not None:
-            result = _get_current_app_fn()
-            if result is not None:
-                return result
-        return tater_app
+    _ta = session_resolver(tater_app)
 
     def _find_nested_template(ld: str):
         segments = ld.split("-")

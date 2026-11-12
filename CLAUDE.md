@@ -197,9 +197,16 @@ ontology files + optional annotations) → all data held as Python objects in me
 `TaterApp` instance → redirect to `/annotate` → `serve_layout()` looks up the session cache
 and returns the annotation layout. No temp files are written.
 
-**Session cache:** `_session_cache` is an `OrderedDict` in `runner.py` mapping
-`session_id → TaterApp`. Bounded by `TATER_SESSION_CACHE_MAX` (env var, default `100`);
-when the limit is exceeded, the oldest entry is evicted via `popitem(last=False)`.
+**Session cache:** `_session_cache` is a `SessionCache` (`runner.py`) mapping
+`session_id → TaterApp`, behind one lock (the server is threaded). It evicts the least
+recently used session — every callback's `get` counts as use, so an annotator who is working
+isn't the one dropped — when there are more than `TATER_SESSION_CACHE_MAX` sessions (default
+`100`) or more than `TATER_SESSION_DOCS_MAX` documents across them (default `200000`; `0` = no
+document limit). Memory grows with documents (#115: about 33–53 MB per 10,000-document
+session, 2 MB at 500), so the document limit is what bounds memory. The session just added is
+never evicted. A user whose session has gone gets the upload page with a notice
+(`SESSION_ENDED_NOTICE`, `build_upload_layout(notice=...)`); their open tab's callbacks change
+nothing (`session_resolver`).
 `flask.session` stores only `{"session_id": session_id}` — a UUID string — to stay under
 the cookie size limit.
 
@@ -228,10 +235,15 @@ parsed inline with `yaml.safe_load`, and injected directly into the schema dict 
 
 **Always-register callbacks:** span, repeater, nested-repeater, hierarchical-label-select, and
 hierarchical-label-multi callbacks are registered once at server startup (not per-session).
-They use a `_ta()` runtime resolver — `app._tater_get_current_app` is a function stored on
-the Dash app that looks up the calling user's `TaterApp` from `_session_cache` via
-`flask.session` at callback invocation time. This avoids re-registering callbacks for each
-upload session (Dash only allows each output to be registered once).
+They use a `_ta()` runtime resolver from `session_resolver(tater_app)` (`callbacks/helpers.py`) —
+`app._tater_get_current_app` is a function stored on the Dash app that looks up the calling
+user's `TaterApp` from `_session_cache` via `flask.session` at callback invocation time. This
+avoids re-registering callbacks for each upload session (Dash only allows each output to be
+registered once). The callbacks are registered by the *first* session's `TaterApp`, so in hosted
+mode `_ta()` must never fall back to the `tater_app` it was built from: when the caller's session
+is gone (evicted, or a tab left open across a restart) it raises `PreventUpdate`. A fallback
+showed one user another user's documents and applied their edits to them (#115). Use
+`session_resolver` for any new session-aware callback, and call `_ta()` only inside callback bodies.
 
 **`_tater_app` vs `_tater_get_current_app`:** two different mechanisms are used to give
 callbacks access to the right `TaterApp` instance, depending on mode:
@@ -394,6 +406,24 @@ long tasks, the ratio of the largest size to 500, and trace flags (an output fir
 a request or response over 100 KB, a 204 that changed nothing). Only `perf/results/baseline.*`
 is committed. The design is in `docs/pitches/scaling/scaling-spec.md`.
 
+Hosted mode under load (#115): `perf.load` records one real hosted session with Playwright,
+replays it as many simulated users (`requests`, with think time, or `burst` where every Next
+lands at once) while a probe browser times Next, tick and notes, and samples the server's
+memory and CPU. Plus one-off scenarios: session start, and the session limit (cache of 3, two
+idle users; nobody working may be dropped). It writes `perf/results/<date>-<sha>-load.{csv,md}`;
+`perf/results/load-baseline.*` is committed. The target is 20 annotators on 10,000-document
+projects: probe Next p95 ≤ 500 ms (338 ms in the baseline) and peak memory ≤ 75% of the
+instance (840 MB, so about 1.5 GB). A full run takes about 30 minutes and peaks around 1.5 GB
+on this machine; run it under a memory watchdog.
+
+```bash
+uv run python -m perf.load --sizes 500,10000 --users 1,5,20 --modes steady,burst
+```
+
+The README's "Deploying hosted mode" turns the results into instance sizes and
+`TATER_SESSION_DOCS_MAX` values; update it when the baseline changes. The design is in
+`docs/pitches/hosted-load/hosted-load-spec.md`.
+
 ## Widget conventions
 
 Widget base class hierarchy in `base.py`:
@@ -480,7 +510,8 @@ the JS filter.
   `upload_layout.py`); user pastes prompt into Claude/ChatGPT, pastes resulting JSON back,
   clicks Apply; validated by `apply_llm_schema` and stored in `schema-store`
 - Hosted mode temp-file-free session management: in-memory data flow, session cache
-  (`OrderedDict`) with FIFO eviction via `TATER_SESSION_CACHE_MAX`
+  (`SessionCache`) with least-recently-used eviction by `TATER_SESSION_CACHE_MAX` and
+  `TATER_SESSION_DOCS_MAX`, and a notice for users whose session has ended
 
 ## Tests
 
@@ -508,9 +539,10 @@ import `perf.synthetic`).
 - `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
-- `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, session cache eviction
+- `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, `SessionCache` (least recently used eviction by count and documents, thread safety), `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
-- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors)
+- `test_load.py` — `perf.load` helpers (no server): request dependencies for replay, percentiles and summaries, `Recording` JSON round-trip
+- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents) and `TestHostedEviction` (the least recently used session is the one evicted; its user gets the session-ended notice)
 
 **Browser test setup:** Playwright's Chromium, installed once with `uv run playwright install
 chromium` (no Chrome or ChromeDriver; the tests run in a Claude Code sandbox). pytest-playwright

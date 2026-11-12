@@ -67,16 +67,24 @@ def _single_case(n_docs: int, length: str, schema: str, filled: bool, spans: int
         }
 
 
-def _hosted_case(n_docs: int, length: str, schema: str, filled: bool, spans: int) -> dict:
+def _hosted_case(n_docs: int, length: str, schema: str, filled: bool, spans: int, distinct: bool = False) -> dict:
+    """Server memory as hosted sessions open. With ``distinct``, session k gets its own
+    project (seed k) instead of every session sharing one."""
     from dash import Dash
     from tater.ui.runner import _build_session_app_from_data
 
-    project = make_project(n_docs, LENGTHS[length], filled, spans_per_doc=spans, schema=schema)
+    def project_for(k: int):
+        return make_project(n_docs, LENGTHS[length], filled, spans_per_doc=spans, schema=schema,
+                            seed=k if distinct else 0)
+
+    project = project_for(0)
     dash_app = Dash(__name__, suppress_callback_exceptions=True)
     dash_app._tater_get_current_app = lambda: None
     sessions, rss = [], {}
     base = _rss_mb()
     for k in range(1, max(HOSTED_SESSIONS) + 1):
+        if distinct:
+            project = project_for(k)
         sessions.append(_build_session_app_from_data(
             dash_app, schema_data=project.schema, docs_data=project.docs,
             annotations_data=project.annotations or None,
@@ -90,10 +98,14 @@ def _hosted_case(n_docs: int, length: str, schema: str, filled: bool, spans: int
     }
 
 
-def run_case(hosted: bool, n_docs: int, length: str, schema: str, filled: bool, spans: int = 0) -> dict:
+def run_case(hosted: bool, n_docs: int, length: str, schema: str, filled: bool, spans: int = 0,
+             distinct: bool = False) -> dict:
     """Run one case in a subprocess and return its measurements."""
-    spec = json.dumps({"hosted": hosted, "n_docs": n_docs, "length": length, "schema": schema,
-                       "filled": filled, "spans": spans})
+    spec = {"hosted": hosted, "n_docs": n_docs, "length": length, "schema": schema,
+            "filled": filled, "spans": spans}
+    if distinct:
+        spec["distinct"] = True
+    spec = json.dumps(spec)
     out = subprocess.run([sys.executable, "-m", "perf.bench_server", "--one", spec],
                          capture_output=True, text=True, check=True)
     return json.loads(out.stdout.strip().splitlines()[-1])
@@ -108,6 +120,8 @@ def main(argv=None) -> None:
     parser.add_argument("--filled", choices=["yes", "no", "both"], default="both")
     parser.add_argument("--spans", type=int, default=10, help="spans per document in filled realistic projects")
     parser.add_argument("--hosted", action="store_true", help="measure memory per hosted session instead")
+    parser.add_argument("--distinct", action="store_true",
+                        help="with --hosted, give each session its own project rather than one shared one")
     args = parser.parse_args(argv)
 
     if args.one:
@@ -128,8 +142,9 @@ def main(argv=None) -> None:
             for f in filled:
                 for n in (int(s) for s in args.sizes.split(",")):
                     spans = args.spans if (f and schema == "realistic") else 0
-                    result = run_case(args.hosted, n, length, schema, f, spans)
-                    print(json.dumps({"n_docs": n, "length": length, "schema": schema, "filled": f} | result))
+                    result = run_case(args.hosted, n, length, schema, f, spans, distinct=args.distinct)
+                    print(json.dumps({"n_docs": n, "length": length, "schema": schema, "filled": f}
+                                     | ({"distinct": True} if args.distinct else {}) | result))
 
 
 if __name__ == "__main__":

@@ -479,7 +479,7 @@ tater --hosted [options]
 | `--debug` | Enable debug/hot-reload mode |
 | `--show-disclaimer` | Display a disclaimer modal that users must acknowledge before accessing the annotation UI (hosted mode only) |
 
-Environment variables: `TATER_APP_PORT`, `TATER_APP_HOST`, `TATER_APP_DEBUG`, `TATER_SECRET_KEY`, `TATER_SESSION_CACHE_MAX` (hosted mode session cache size, default `100`).
+Environment variables: `TATER_APP_PORT`, `TATER_APP_HOST`, `TATER_APP_DEBUG`, `TATER_SECRET_KEY`, `TATER_SESSION_CACHE_MAX` (hosted mode: most sessions kept in memory, default `100`), `TATER_SESSION_DOCS_MAX` (hosted mode: most documents across those sessions, default `200000`; `0` for no limit). When either is exceeded, the least recently used session is dropped and its user is told on their next page load.
 
 ## Jupyter notebooks
 
@@ -588,6 +588,71 @@ tater --hosted --host 0.0.0.0 --port 8050
 - No auto-save — annotations live in the browser (`dcc.Store`) and must be downloaded explicitly
 - `file_path` is not supported in documents — use inline `text` instead
 - Hierarchy files referenced by path in the schema must be uploaded separately (inline hierarchy dicts work without upload)
+
+### Deploying hosted mode
+
+Hosted mode keeps every user's session — their documents, schema and a copy of their
+annotations — in the memory of one server process. That decides what a hosting platform has
+to provide.
+
+**Memory.** Plan for the server's base memory plus a cost per open session, which grows with
+the number of documents:
+
+| Project size | Memory per session |
+|---|---|
+| 500 documents | about 2 MB |
+| 10,000 documents, new project | about 33 MB |
+| 10,000 documents, resumed from a fully annotated file | about 53 MB |
+
+The base is about 120 MB (72 MB at start, plus about 50 MB the first session adds once). Give
+the instance enough that the total stays under 75% of its memory:
+
+> instance memory ≥ (120 MB + sessions × MB per session) / 0.75
+
+For example, 20 annotators on 10,000-document projects need about 1.2 GB at worst, so a 2 GB
+instance (a new project measured 840 MB at peak, which fits in 1.5 GB). A 512 MB instance holds
+about five such sessions. These figures come from the synthetic "realistic" project in `perf/`
+(`perf/results/load-baseline.md`); longer documents or schemas with more fields cost more, and
+`python -m perf.bench_server --hosted` measures a project like yours.
+
+**Session limits.** When there are more than `TATER_SESSION_CACHE_MAX` sessions (default
+`100`) or more than `TATER_SESSION_DOCS_MAX` documents across them (default `200000`), the
+least recently used session is dropped, and its user sees a notice on their next page load.
+The document limit is what bounds memory; match it to the instance, at about 5 MB per 1,000
+documents:
+
+| Instance memory | `TATER_SESSION_DOCS_MAX` |
+|---|---|
+| 512 MB | `50000` |
+| 1 GB | `120000` |
+| 2 GB | `250000` (the default, `200000`, fits) |
+| 4 GB | `550000` |
+
+**One instance.** Sessions live in one process, so run exactly one instance — no extra
+replicas, no autoscaling. With more than one, each request has to reach the instance that holds
+its session (sticky sessions), and every instance needs the same `TATER_SECRET_KEY`.
+
+**`TATER_SECRET_KEY`.** Set it. Without it each process makes a random key when it starts, which
+is fine for one instance but breaks sessions across several.
+
+**No scale-to-zero, no restarts while people annotate.** Stopping the process drops every
+session; annotations that weren't downloaded are lost. Keep at least one instance always
+running, deploy between annotation sessions, and ask annotators to download their work
+regularly.
+
+**CPU.** At 20 annotators on 10,000-document projects, Next took 338 ms (95th percentile, in
+the browser) and the server's CPU peaked at about 2.3 cores, briefly. That was measured without
+a CPU limit; allow at least 1 CPU. `python -m perf.load --limit` measures under an instance's
+limits.
+
+Where these settings live:
+
+- **Azure Container Apps:** *Scale*: min replicas 1, max replicas 1. *Ingress*: session
+  affinity, only if you run more than one replica. *Containers*: environment variables
+  (`TATER_SECRET_KEY` as a secret, `TATER_SESSION_DOCS_MAX`) and CPU/memory (on the
+  Consumption plan memory comes with CPU, e.g. 1 vCPU / 2 GiB).
+- **Kubernetes (`k8s/chart`):** `replicaCount: 1`, `autoscaling.enabled: false`, and raise
+  `resources` from the chart's 512Mi to match the table above.
 
 ## Testing
 

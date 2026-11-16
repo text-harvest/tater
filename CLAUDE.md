@@ -459,10 +459,12 @@ Widget base class hierarchy in `base.py`:
 - `register_callbacks(app)` captures `self` fields into the closure — don't rely on `self` inside
   callback functions (capture to local variables before the `@app.callback` decorator).
 - **Escape-hatch callbacks**: for cross-field rules that can't be expressed as widget declarations,
-  assign widgets to named variables and use `widget.component_id` in `Output`/`Input` — avoids
+  assign widgets to named variables and use `widget.schema_id` in `Output`/`Input` — avoids
   hard-coding ID strings. See `apps/examples/config/hooks.py` for the pattern. The `register_callbacks(app)` function
   in a config module is the right place for these; it is called after `set_annotation_widgets` so
-  all component IDs are finalised.
+  all component IDs are finalised. The README marks custom Dash callbacks as experimental (they
+  may break as internals change); `on_save` is the supported hook. No known users yet, so
+  internal ID changes needn't preserve them, but update `hooks.py` when they break it.
 - `required=True` is **UI-only**: it shows a `*` indicator and drives the `in_progress` /
   `complete` status badge, but does not prevent saving an empty value. This is intentional —
   annotation tools need to support partial saves so annotators can leave fields blank and

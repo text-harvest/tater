@@ -115,7 +115,23 @@ A config file is a plain Python module. The `tater` CLI looks for these names:
 | `title` | no | App window title (default: `"tater - document annotation"`) |
 | `description` | no | Subtitle shown below the title |
 | `instructions` | no | Markdown help text shown in the instructions drawer |
-| `register_callbacks` | no | Callable `(app: TaterApp) -> None` called after widgets are registered; use for custom Dash callbacks and setting `app.on_save` |
+| `register_callbacks` | no | Callable `(app: TaterApp) -> None` called after widgets are registered; use for custom Dash callbacks and setting `app.on_save` (see below) |
+
+### Custom callbacks
+
+`register_callbacks(app)` can do two things:
+
+- **Set hooks.** `app.on_save = fn` calls `fn(doc_id, annotation)` with the validated Pydantic
+  model after each save. This is the supported way to react to edits.
+- **Add Dash callbacks** on `app.app`, for rules the widget options can't express, using a
+  widget's `schema_id` as the component ID. See
+  [apps/examples/config/hooks.py](apps/examples/config/hooks.py).
+
+Custom Dash callbacks are **experimental**. They depend on tater's internal component IDs,
+value props and callback structure, which may change in any release as the tool evolves, so
+check them when you upgrade. Avoid taking `annotations-store` or `metadata-store` as an
+`Input` or `State`: those hold every document, and a callback that reads them slows every
+action on large projects.
 
 ## Widgets
 

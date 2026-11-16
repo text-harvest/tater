@@ -12,6 +12,9 @@ Escape hatch
 whenever ``needs_attention`` is unchecked — a cross-field rule that can't be
 expressed as a widget declaration.  It runs after ``set_annotation_widgets``
 so that Tater's component IDs are already finalised.
+
+Custom Dash callbacks are experimental: they depend on Tater's internal component
+IDs and value props, which may change as the tool evolves.
 """
 import json
 from pathlib import Path
@@ -34,7 +37,7 @@ instructions = """## Auto-Update Features
 
 **Pet Mood** → Logs the selection via hook callback.
 
-**Needs Attention** → Checking this box triggers an escape-hatch callback that auto-clears the mood field.
+**Needs Attention** → Unchecking this box triggers an escape-hatch callback that auto-clears the mood field.
 """
 
 pet_mood = SegmentedControlWidget(

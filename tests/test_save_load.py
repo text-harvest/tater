@@ -621,6 +621,33 @@ class TestThrottledSave:
         assert self._saved_overall(tmp_path) == "a"
         assert app._save_error is None
 
+    def test_flush_waits_for_write_in_progress(self, tmp_path, docs_file, monkeypatch):
+        """#123: a flush during the timer's write used to see nothing pending and
+        return before the write finished, so at exit those edits were lost."""
+        import threading
+        import tater.ui.tater_app as tater_app_module
+        app = self._app(tmp_path, docs_file)
+        real = tater_app_module._write_json_atomic
+        started, release = threading.Event(), threading.Event()
+
+        def slow(path, data):
+            started.set()
+            assert release.wait(5), "write was never released"
+            real(path, data)
+
+        monkeypatch.setattr(tater_app_module, "_write_json_atomic", slow)
+        app._save_delta_to_file(self._delta(app, 1, "a"))  # timer writes at once
+        assert started.wait(5), "background write did not start"
+
+        flusher = threading.Thread(target=app.flush_saves)
+        flusher.start()
+        flusher.join(0.2)
+        assert flusher.is_alive(), "flush_saves returned while a write was in progress"
+        release.set()
+        flusher.join(5)
+        assert not flusher.is_alive()
+        assert self._saved_overall(tmp_path) == "a"
+
 
 class TestAtomicSave:
     def test_failed_write_keeps_previous_file(self, tmp_path, single_doc_file, monkeypatch):

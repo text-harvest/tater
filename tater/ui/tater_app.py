@@ -130,13 +130,15 @@ class TaterApp:
         self._delta_seq: dict[str, tuple[str, int]] = {}
         self._save_lock = threading.Lock()
         # Throttled file writes (2.5 in the scaling spec): _dirty marks merged edits not
-        # yet written; _write_lock keeps two writers off the same temp file.
+        # yet written; _write_lock keeps two writers off the same temp file;
+        # _flush_lock makes a flush wait for one already writing (#123).
         self.save_interval = save_interval
         self._dirty = False
         self._pending_hooks: set[str] = set()
         self._save_timer: threading.Timer | None = None
         self._timer_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._flush_lock = threading.Lock()
         self._last_write = 0.0
         if annotations_path:
             atexit.register(self.flush_saves)
@@ -427,23 +429,29 @@ class TaterApp:
 
         Runs on the save timer, at exit, and wherever the file must be current (e.g.
         before reading it). A failed write leaves the edits pending for the next one.
+
+        Returns only once the edits merged before the call are in the file (or their
+        write failed). A flush that starts while another is writing waits for it:
+        otherwise it would find nothing pending and return early, and at exit the
+        daemon timer thread doing that write would be killed mid-write (#123).
         """
-        with self._timer_lock:
-            if self._save_timer is not None and self._save_timer is not threading.current_thread():
-                self._save_timer.cancel()
-            self._save_timer = None
-            # The interval runs from the start of this write, so a save arriving while
-            # it runs is scheduled for the interval's end, not straight after.
-            self._last_write = time.monotonic()
-        with self._save_lock:
-            if not self._dirty:
-                return
-            self._dirty = False
-            hooks, self._pending_hooks = self._pending_hooks, set()
-        if not self._write_store_data(sorted(hooks)):
+        with self._flush_lock:
+            with self._timer_lock:
+                if self._save_timer is not None and self._save_timer is not threading.current_thread():
+                    self._save_timer.cancel()
+                self._save_timer = None
+                # The interval runs from the start of this write, so a save arriving
+                # while it runs is scheduled for the interval's end, not straight after.
+                self._last_write = time.monotonic()
             with self._save_lock:
-                self._dirty = True
-                self._pending_hooks |= hooks
+                if not self._dirty:
+                    return
+                self._dirty = False
+                hooks, self._pending_hooks = self._pending_hooks, set()
+            if not self._write_store_data(sorted(hooks)):
+                with self._save_lock:
+                    self._dirty = True
+                    self._pending_hooks |= hooks
 
     def _save_stores_to_file(
         self,

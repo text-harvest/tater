@@ -773,7 +773,14 @@ def tater_all_widgets(tmp_path):
     docs.write_text(json.dumps(ROUND_TRIP_DOCS))
     app = TaterApp(title="Round trip", schema_model=AllWidgets, annotations_path=str(tmp_path / "ann.json"))
     app.load_documents(str(docs))
-    app.set_annotation_widgets([
+    app.set_annotation_widgets(_all_widgets())
+    yield app
+    app.flush_saves()
+
+
+def _all_widgets() -> list:
+    """A widget for every AllWidgets field."""
+    return [
         RadioGroupWidget("radio", label="Radio"),
         # Not filled: hidden while radio != "c". Checks conditional wrappers don't hide
         # the other widgets' values after a reload.
@@ -802,9 +809,7 @@ def tater_all_widgets(tmp_path):
                 TextInputWidget("note", label="Note"),
             ]),
         ]),
-    ])
-    yield app
-    app.flush_saves()
+    ]
 
 
 def _ctl(page: Page, tf: str, ld: str = "", path: str = ""):
@@ -1020,6 +1025,51 @@ class TestWidgetRoundTrip:
         saved = read_saved(tater_all_widgets)["doc1"]["annotations"]
         assert _mismatches(saved, {**FILLED, "text": "changed"}) == {}
         assert errors == []
+
+
+# Saved values that the schema or the widgets no longer offer (#122): choices
+# removed from a Literal, numbers outside a slider's range, ontology nodes that
+# are gone, and a field the schema no longer has.
+UNOFFERED = {
+    "radio": "z",
+    "segmented": "z",
+    "chip_radio": "z",
+    "select": "z",
+    "multi_select": ["a", "z"],
+    "checkbox_group": ["a", "z"],
+    "slider": 99,
+    "range_slider": [0, 500],
+    "hl_one": ["Head", "Gone"],
+    "hl_many": [["Gone", "Away"], ["Abdomen", "Liver"]],
+    "items": [{"kind": "z", "evidence": [], "parts": []}],
+    "removed_field": "kept",
+}
+
+
+class TestUnofferedValues:
+    """Viewing a document whose saved values the widgets don't offer, and editing
+    another field, must leave those values in the file (#122)."""
+
+    def test_unoffered_values_survive_view_and_edit(self, open_app, tmp_path, errors):
+        docs = tmp_path / "docs.json"
+        docs.write_text(json.dumps(ROUND_TRIP_DOCS))
+        ann = tmp_path / "ann.json"
+        ann.write_text(json.dumps({"doc1": {"annotations": UNOFFERED, "metadata": {}}}))
+        app = TaterApp(title="Unoffered", schema_model=AllWidgets, annotations_path=str(ann))
+        app.load_documents(str(docs))
+        app.set_annotation_widgets(_all_widgets())
+        try:
+            page = open_app(app)
+            _go(page, "#btn-next", 2)
+            _go(page, "#btn-prev", 1)
+            _ctl(page, "text").fill("edited")
+            wait_quiet(page)
+            saved = read_saved(app)["doc1"]["annotations"]
+            assert saved["text"] == "edited", "the edit wasn't saved"
+            assert _mismatches(saved, UNOFFERED) == {}
+            assert errors == []
+        finally:
+            app.flush_saves()
 
 
 # ---------------------------------------------------------------------------

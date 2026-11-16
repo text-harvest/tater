@@ -621,12 +621,13 @@ def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
             return no_update
 
         _LABELS = {
-            "extra": "In saved file, not in current schema — will be removed on save:",
+            "invalid": "Saved values the current schema doesn't accept — kept as saved until changed:",
+            "extra": "In saved file, not in current schema — kept in the file, not shown:",
             "missing": "In current schema, not in saved file — will initialize to default:",
         }
 
         sections = []
-        for key in ("extra", "missing"):
+        for key in ("invalid", "extra", "missing"):
             fields = warnings.get(key)
             if not fields:
                 continue

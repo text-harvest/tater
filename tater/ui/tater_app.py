@@ -65,6 +65,75 @@ def _write_json_atomic(path: Path, data: Any) -> None:
         raise
 
 
+def _merge_saved(base: Any, raw: Any, raw_wins: bool) -> Any:
+    """Merge saved data *raw* into *base* (a validated ``model_dump()``).
+
+    Keys only in *raw* are kept, at any depth (dicts, and lists of the same length,
+    are merged item by item), so fields the schema no longer has are written back
+    as they were. Where both have a value, *raw* wins if *raw_wins* (a document
+    that failed validation keeps every saved value), else *base* (validated values).
+    """
+    if isinstance(base, dict) and isinstance(raw, dict):
+        out = dict(base)
+        for key, value in raw.items():
+            out[key] = _merge_saved(base[key], value, raw_wins) if key in base else value
+        return out
+    if isinstance(base, list) and isinstance(raw, list) and len(base) == len(raw):
+        return [_merge_saved(b, r, raw_wins) for b, r in zip(base, raw)]
+    return raw if raw_wins else base
+
+
+def _drop_at(data: Any, loc: tuple) -> Optional[str]:
+    """Remove the value at a validation error's *loc* from *data* (in place).
+
+    Follows *loc* as far as it exists in *data* (Pydantic adds parts such as union
+    tags that aren't keys) and removes that value. Returns its dotted path, or
+    None if *loc* matched nothing.
+    """
+    parent, key, cur, path = None, None, data, []
+    for part in loc:
+        if isinstance(cur, dict) and part in cur:
+            pass
+        elif isinstance(cur, list) and isinstance(part, int) and 0 <= part < len(cur):
+            pass
+        else:
+            break
+        parent, key, cur = cur, part, cur[part]
+        path.append(str(part))
+    if parent is None:
+        return None
+    del parent[key]
+    return ".".join(path)
+
+
+def _validate_lenient(model: Type[BaseModel], data: dict) -> tuple[BaseModel, list[str]]:
+    """Validate *data* against *model*, dropping values that don't fit.
+
+    Returns the model built from what's left (the defaults stand in for what was
+    dropped) and the dotted paths of the dropped values; empty when *data* is valid.
+    """
+    from pydantic import ValidationError
+    import copy
+    work = copy.deepcopy(data)
+    bad: list[str] = []
+    for _ in range(10):
+        try:
+            return model(**work), bad
+        except ValidationError as e:
+            # Deepest and last first, so removing a list item doesn't shift the
+            # indices of other errors in the same list.
+            locs = sorted(
+                {err["loc"] for err in e.errors()},
+                key=lambda loc: (len(loc), [(0, p) if isinstance(p, int) else (1, str(p)) for p in loc]),
+                reverse=True,
+            )
+            dropped = [p for p in (_drop_at(work, loc) for loc in locs) if p is not None]
+            if not dropped:
+                break
+            bad.extend(dropped)
+    return model(), bad or ["(whole document)"]
+
+
 class TaterApp:
     """Main Tater application for document annotation."""
 
@@ -119,6 +188,12 @@ class TaterApp:
         self.metadata: dict[str, DocumentMetadata] = {}
         self._save_error: str | None = None
         self._schema_warnings: dict[str, list[str]] = {}
+        # Annotations as loaded from the file, per document, and the documents whose
+        # annotations didn't fit the schema ({doc_id: [dotted field paths]}). The
+        # server copy keeps what the schema doesn't know or no longer accepts, so
+        # saving never drops it (#122).
+        self._saved_ann: dict[str, dict] = {}
+        self._invalid_docs: dict[str, list[str]] = {}
         # Server copy of annotations-store / metadata-store as plain dicts. Built
         # lazily from annotations/metadata and replaced on every save, so each page
         # load serves the latest state rather than what was loaded at startup.
@@ -304,7 +379,13 @@ class TaterApp:
     def _store_data(self) -> tuple[dict, dict]:
         """Return the current ({doc_id: annotations}, {doc_id: metadata}) dicts."""
         if self._ann_data is None or self._meta_data is None:
-            self._ann_data = {doc_id: ann.model_dump() for doc_id, ann in self.annotations.items()}
+            self._ann_data = {}
+            for doc_id, ann in self.annotations.items():
+                dumped = ann.model_dump()
+                saved = self._saved_ann.get(doc_id)
+                if saved is not None:
+                    dumped = _merge_saved(dumped, saved, raw_wins=doc_id in self._invalid_docs)
+                self._ann_data[doc_id] = dumped
             self._meta_data = {doc_id: meta.model_dump() for doc_id, meta in self.metadata.items()}
         return self._ann_data, self._meta_data
 
@@ -335,37 +416,68 @@ class TaterApp:
             print(f"Error loading annotations: {e}")
 
     def _apply_annotations_data(self, data: dict) -> None:
-        """Apply a parsed annotations dict to self.annotations and self.metadata."""
+        """Apply a parsed annotations dict to self.annotations and self.metadata.
+
+        Each document is validated on its own, so one that doesn't fit the schema
+        can't stop the rest loading (#122). Saved values the schema no longer
+        accepts, and fields it no longer has, are kept in the server copy of the
+        stores (``_store_data``) and so written back unchanged by the next save.
+        """
+        from tater.models.document import DocumentMetadata
         self._ann_data = self._meta_data = None
-        try:
-            from tater.models.document import DocumentMetadata
-            extra_fields: set[str] = set()
-            missing_fields: set[str] = set()
+        self._saved_ann = {}
+        self._invalid_docs = {}
+        extra_fields: set[str] = set()
+        missing_fields: set[str] = set()
+        schema_fields = set(self.schema_model.model_fields) if self.schema_model else set()
+        meta_keys = ("flagged", "notes", "annotation_seconds", "visited", "status")
 
-            for doc_id, doc_data in data.items():
-                ann_data = doc_data.get("annotations", {})
-                meta = doc_data.get("metadata", {})
-                self.metadata[doc_id] = DocumentMetadata(
-                    flagged=meta.get("flagged", False),
-                    notes=meta.get("notes", ""),
-                    annotation_seconds=meta.get("annotation_seconds", 0.0),
-                    visited=meta.get("visited", False),
-                    status=meta.get("status", "not_started"),
-                )
-                if self.schema_model and ann_data:
-                    schema_fields = set(self.schema_model.model_fields.keys())
-                    ann_fields = set(ann_data.keys())
-                    extra_fields |= ann_fields - schema_fields
-                    missing_fields |= schema_fields - ann_fields
-                    self.annotations[doc_id] = self.schema_model(**ann_data)
+        if not isinstance(data, dict):
+            print(f"Error applying annotations: expected an object of documents, got {type(data).__name__}")
+            return
 
-            self._schema_warnings = {}
-            if extra_fields:
-                self._schema_warnings["extra"] = sorted(extra_fields)
-            if missing_fields:
-                self._schema_warnings["missing"] = sorted(missing_fields)
-        except Exception as e:
-            print(f"Error applying annotations: {e}")
+        for doc_id, doc_data in data.items():
+            if not isinstance(doc_data, dict):
+                print(f"Skipping annotations for {doc_id!r}: expected an object")
+                continue
+            meta = doc_data.get("metadata") or {}
+            meta = {k: meta[k] for k in meta_keys if isinstance(meta, dict) and k in meta}
+            self.metadata[doc_id], bad_meta = _validate_lenient(DocumentMetadata, meta)
+            if bad_meta:
+                print(f"Metadata for {doc_id!r} reset to defaults: {', '.join(bad_meta)}")
+
+            ann_data = doc_data.get("annotations") or {}
+            if not self.schema_model or not ann_data:
+                continue
+            if not isinstance(ann_data, dict):
+                print(f"Skipping annotations for {doc_id!r}: expected an object, got {type(ann_data).__name__}")
+                continue
+            extra_fields |= set(ann_data) - schema_fields
+            missing_fields |= schema_fields - set(ann_data)
+            self.annotations[doc_id], bad = _validate_lenient(self.schema_model, ann_data)
+            self._saved_ann[doc_id] = ann_data
+            if bad:
+                self._invalid_docs[doc_id] = bad
+
+        self._schema_warnings = {}
+        if extra_fields:
+            self._schema_warnings["extra"] = sorted(extra_fields)
+        if missing_fields:
+            self._schema_warnings["missing"] = sorted(missing_fields)
+        if self._invalid_docs:
+            lines = [f"{doc_id}: {', '.join(fields)}" for doc_id, fields in self._invalid_docs.items()]
+            print(
+                f"{len(lines)} document(s) have saved values the schema doesn't accept. "
+                "They are kept as saved; fix them in the app or the schema:"
+            )
+            for line in lines[:20]:
+                print(f"  {line}")
+            if len(lines) > 20:
+                print(f"  ... and {len(lines) - 20} more")
+            # The notification lists a few; the layout shouldn't carry thousands.
+            self._schema_warnings["invalid"] = lines[:10] + (
+                [f"... and {len(lines) - 10} more"] if len(lines) > 10 else []
+            )
 
     def _apply_save_delta(self, delta: dict | None) -> list[str]:
         """Merge a ``save-delta`` into the server copy of the stores.
@@ -504,15 +616,25 @@ class TaterApp:
             return False
 
         if self.on_save and self.schema_model:
+            from pydantic import ValidationError
             for d_id, ann in hook_anns.items():
                 try:
-                    self.on_save(d_id, self.schema_model(**ann))
+                    model = self.schema_model(**ann)
+                except ValidationError:
+                    print(f"on_save skipped for {d_id!r}: its annotations don't fit the schema")
+                    continue
+                try:
+                    self.on_save(d_id, model)
                 except Exception as hook_err:
                     print(f"on_save hook error: {hook_err}")
         return True
 
     def _save_annotations_to_file(self, doc_id: Optional[str] = None) -> None:
         """Save all annotations to the annotations file.
+
+        Writes from the ``annotations`` models, so saved values the schema rejects
+        or no longer has are dropped. The app itself saves the server copy of the
+        stores (``_write_store_data``), which keeps them; this is used by tests.
 
         Args:
             doc_id: The document whose annotation triggered this save.  When

@@ -116,6 +116,14 @@ outputs, execution counts, and kernel metadata on `git add`).
   `None`); annotations live in the browser and the user downloads them explicitly.
   Format: `{doc_id: {annotations: {...}, metadata: {...}}}`. Saves write a temp file and
   `os.replace` it (`_write_json_atomic`), so a crash never leaves a truncated file.
+- **Loading after a schema change** (#122): `_apply_annotations_data` validates each document
+  on its own (`_validate_lenient` drops the values that don't fit and records their paths in
+  `_invalid_docs`). The raw saved annotations stay in `_saved_ann`, and `_store_data` merges
+  them back (`_merge_saved`): fields the schema no longer has are kept for every document, and
+  a document that failed keeps all its saved values. So the browser holds them, and saves write
+  them back until an annotator changes them. The schema-mismatch notification lists the failed
+  documents (first 10; the terminal shows 20). `on_save` is skipped for a document that doesn't
+  validate. Widgets leave a saved value they don't offer alone (`TestUnofferedValues`); keep it so.
 - **Server copy of the stores**: `TaterApp._store_data()` returns the current
   `(annotations, metadata)` dicts. It's built lazily from `annotations` / `metadata` and updated
   by every save-delta (`_apply_save_delta`, called by `auto_save`; in hosted mode by the
@@ -538,13 +546,13 @@ import `perf.synthetic`).
 - `test_bind_schema.py` — `bind_schema` for all widget types (happy path + error cases)
 - `test_component_id.py` — `component_id` and `conditional_wrapper_id` derivation
 - `test_decode_field_path.py` — `_decode_field_path` for standalone, single-repeater, and doubly-nested cases
-- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
+- `test_save_load.py` — `TaterApp` save/load round-trip (no browser): flat fields, nested models, `SpanAnnotation` lists, metadata, schema-mismatch warnings, keeping saved values after a schema change (`TestSchemaChangeKeepsData`, #122), page loads serving the latest save (`_store_data`), save deltas (`_save_delta_to_file`: merge, stale deltas, `on_save`), throttled writes (`save_interval`, `flush_saves`), atomic writes
 - `test_widgets_from_model.py` — `widgets_from_model`, `WIDGET_CLASS`, `DEFAULT_WIDGET`; auto-gen for all field types, nested models, overrides
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, `SessionCache` (least recently used eviction by count and documents, thread safety), `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
 - `test_load.py` — `perf.load` helpers (no server): request dependencies for replay, percentiles and summaries, `Recording` JSON round-trip
-- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents) and `TestHostedEviction` (the least recently used session is the one evicted; its user gets the session-ended notice)
+- `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload), `TestUnofferedValues` (saved values a widget doesn't offer survive viewing and editing, #122) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents) and `TestHostedEviction` (the least recently used session is the one evicted; its user gets the session-ended notice)
 
 **Browser test setup:** Playwright's Chromium, installed once with `uv run playwright install
 chromium` (no Chrome or ChromeDriver; the tests run in a Claude Code sandbox). pytest-playwright

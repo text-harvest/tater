@@ -330,6 +330,121 @@ class TestSchemaMismatch:
         assert "missing" not in app2._schema_warnings
 
 
+class Severity(BaseModel):
+    """FlatSchema-like, after "high" was removed from the choices (#122)."""
+    level: Optional[Literal["low", "medium"]] = None
+    tags: List[Literal["a", "b"]] = Field(default_factory=list)
+    pets: List[Pet] = Field(default_factory=list)
+
+
+class TestSchemaChangeKeepsData:
+    """#122: a saved value the schema no longer accepts must not stop loading, and
+    no save may drop it, or a field the schema no longer has."""
+
+    @pytest.fixture
+    def four_docs(self, tmp_path):
+        p = tmp_path / "docs.json"
+        p.write_text(json.dumps([{"id": f"d{i}", "text": f"Doc {i}."} for i in range(1, 5)]))
+        return str(p)
+
+    def _load(self, tmp_path, docs, saved, interval=0):
+        ann_path = tmp_path / "ann.json"
+        ann_path.write_text(json.dumps(saved))
+        app = make_app(Severity, ann_path)
+        app.save_interval = interval
+        app.load_documents(docs)
+        return app
+
+    def _saved(self, tmp_path):
+        return json.loads((tmp_path / "ann.json").read_text())
+
+    def _save_doc(self, app, doc_id, **changes):
+        ann = {**app._store_data()[0][doc_id], **changes}
+        app._save_delta_to_file({"page": "p", "seq": 1, "docs": {doc_id: {"annotations": ann}}})
+
+    def _issue_file(self):
+        levels = ["low", "high", "medium", "low"]
+        return {
+            f"d{i}": {"annotations": {"level": lvl}, "metadata": {"status": "complete", "visited": True}}
+            for i, lvl in enumerate(levels, 1)
+        }
+
+    def test_every_document_loads(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, self._issue_file())
+        assert [app.annotations[f"d{i}"].level for i in range(1, 5)] == ["low", None, "medium", "low"]
+        assert all(app.metadata[f"d{i}"].status == "complete" for i in range(1, 5))
+        assert app._invalid_docs == {"d2": ["level"]}
+        assert app._schema_warnings["invalid"] == ["d2: level"]
+
+    def test_rejected_value_is_served_and_survives_saves(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, self._issue_file())
+        assert app._store_data()[0]["d2"]["level"] == "high"
+        self._save_doc(app, "d3", level="low")
+        saved = self._saved(tmp_path)
+        assert [saved[f"d{i}"]["annotations"]["level"] for i in range(1, 5)] == ["low", "high", "low", "low"]
+
+    def test_editing_the_rejected_value_replaces_it(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, self._issue_file())
+        self._save_doc(app, "d2", level="medium")
+        assert self._saved(tmp_path)["d2"]["annotations"]["level"] == "medium"
+
+    def test_rejected_doc_keeps_its_other_values(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, {
+            "d1": {"annotations": {"level": "high", "tags": ["a"]}, "metadata": {}},
+        })
+        assert app.annotations["d1"].tags == ["a"]
+        assert app._store_data()[0]["d1"] == {"level": "high", "tags": ["a"], "pets": []}
+
+    def test_removed_fields_survive_saves(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, {
+            "d1": {"annotations": {"level": "low", "old": 1, "pets": [{"kind": "cat", "age": 3}]}, "metadata": {}},
+        })
+        assert "d1" not in app._invalid_docs
+        self._save_doc(app, "d2", level="low")
+        saved = self._saved(tmp_path)["d1"]["annotations"]
+        assert saved["old"] == 1
+        assert saved["pets"] == [{"kind": "cat", "indoor": None, "age": 3}]
+
+    def test_rejected_items_in_lists_are_kept(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, {
+            "d1": {"annotations": {"tags": ["x", "a", "y"], "pets": [{"kind": "cat"}, {"kind": "bird"}]}, "metadata": {}},
+        })
+        assert sorted(app._invalid_docs["d1"]) == ["pets.1.kind", "tags.0", "tags.2"]
+        assert app.annotations["d1"].tags == ["a"]
+        self._save_doc(app, "d2", level="low")
+        saved = self._saved(tmp_path)["d1"]["annotations"]
+        assert saved["tags"] == ["x", "a", "y"]
+        assert saved["pets"] == [{"kind": "cat", "indoor": None}, {"kind": "bird", "indoor": None}]
+
+    def test_bad_metadata_does_not_stop_loading(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, {
+            "d1": {"annotations": {}, "metadata": {"status": "bogus", "flagged": True}},
+            "d2": {"annotations": {"level": "low"}, "metadata": {"status": "complete"}},
+        })
+        assert app.metadata["d1"].flagged is True
+        assert app.metadata["d1"].status == "not_started"
+        assert app.metadata["d2"].status == "complete"
+        assert app.annotations["d2"].level == "low"
+
+    def test_on_save_skipped_for_rejected_doc(self, tmp_path, four_docs):
+        app = self._load(tmp_path, four_docs, self._issue_file())
+        calls = []
+        app.on_save = lambda doc_id, ann: calls.append(doc_id)
+        self._save_doc(app, "d2", tags=["a"])  # level is still "high"
+        self._save_doc(app, "d3", tags=["a"])
+        assert calls == ["d3"]
+
+    def test_warning_list_is_capped(self, tmp_path):
+        docs = tmp_path / "docs.json"
+        docs.write_text(json.dumps([{"id": f"d{i}", "text": "x"} for i in range(15)]))
+        app = self._load(tmp_path, str(docs), {
+            f"d{i}": {"annotations": {"level": "high"}, "metadata": {}} for i in range(15)
+        })
+        assert len(app._invalid_docs) == 15
+        assert len(app._schema_warnings["invalid"]) == 11
+        assert app._schema_warnings["invalid"][-1] == "... and 5 more"
+
+
 # ---------------------------------------------------------------------------
 # File format
 # ---------------------------------------------------------------------------

@@ -213,7 +213,7 @@ Not a test: the restart time measurement above, repeated before release with `pe
 
 ## Documentation
 
-README section "Running a project with several annotators": a minimal project file, `check` / `start` / `links` / `status`, where results land, idle stops, and memory (about 120 MB per running annotator on a small project, up to 200 MB at 10,000 documents; only people working count). The pitch's "where it runs" table, requirements first (encryption in transit, a login for anything sensitive, results on a disk that survives restarts), tools as examples only. Short paragraph on notebook hubs, from the JupyterHub experiment. Hosted mode's README section gets one line pointing projects here. CLAUDE.md: the launcher package, the token check in `run_single`, and the tests.
+README section "Running a project with several annotators": a minimal project file, `check` / `start` / `links` / `status`, where results land, idle stops, and memory (measured 2026-11-17 with `perf.synthetic`, realistic schema, after the first page load: about 120 MB per running annotator at 500 documents, 165 MB at 10,000 new, 245 MB at 10,000 fully annotated; the launcher about 70 MB; only people working count). The pitch's "where it runs" table, requirements first (encryption in transit, a login for anything sensitive, results on a disk that survives restarts), tools as examples only. Short paragraph on notebook hubs. The JupyterHub experiment hasn't been run (no hub available here), so the paragraph says so. Hosted mode's README section gets one line pointing projects here. CLAUDE.md: the launcher package, the token check in `run_single`, and the tests.
 
 ## Order of work and cut line
 

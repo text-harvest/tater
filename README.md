@@ -497,6 +497,8 @@ tater --hosted [options]
 
 Environment variables: `TATER_APP_PORT`, `TATER_APP_HOST`, `TATER_APP_DEBUG`, `TATER_SECRET_KEY`, `TATER_SESSION_CACHE_MAX` (hosted mode: most sessions kept in memory, default `100`), `TATER_SESSION_DOCS_MAX` (hosted mode: most documents across those sessions, default `200000`; `0` for no limit). When either is exceeded, the least recently used session is dropped and its user is told on their next page load.
 
+To run one project for several annotators, see [`tater-launcher`](#running-a-project-with-several-annotators).
+
 ## Jupyter notebooks
 
 Tater can run inline in a Jupyter notebook using `tater.annotate()`.
@@ -577,9 +579,115 @@ app.run(jupyter_mode="inline", port=8050)
 
 A working example notebook is at [apps/examples/notebooks/simple_annotation.ipynb](apps/examples/notebooks/simple_annotation.ipynb).
 
+## Running a project with several annotators
+
+`tater-launcher` runs one project for a team. Annotators share a single address. Behind it, each annotator gets their own ordinary tater process, with their own documents and their own results file. One person's work can't reach another's, and a crash affects only one annotator.
+
+### A project file
+
+```yaml
+title: Pet records review          # optional; shown on the launcher's pages
+schema: schema.json                # or  config: config.py  (exactly one)
+documents: documents.json          # every annotator's documents, unless overridden below
+results: results                   # one folder per annotator is created in here
+idle_minutes: 30                   # stop an annotator's process after this long unused; 0 = never
+annotators:
+  - name: alice                    # lowercase letters, digits, - and _; names the results folder
+  - name: bob
+    documents: splits/bob.json     # bob gets his own set
+admins:                            # optional; admins see the status page
+  - name: dana
+```
+
+Paths are relative to the project file. Every schema field needs a default, as in single mode.
+
+### Commands
+
+```bash
+tater-launcher check   project.yaml    # load the schema and every documents file; report problems
+tater-launcher start   project.yaml    # run it (127.0.0.1:8050 by default; --host / --port)
+tater-launcher links   project.yaml    # print each person's link again
+tater-launcher reissue project.yaml bob   # replace bob's link; his old link and browsers stop working
+tater-launcher status  project.yaml    # who is running, and each annotator's progress
+```
+
+`start` prints one personal link per person. Send each person their own link. Opening it once signs that browser in as them for a year, or until the link is reissued. Annotators then work as in single mode: edits save automatically, and they can close the tab and come back later.
+
+Admins who open their link get the status page at `/_launcher/`. It shows each annotator's process state, when they were last active, and how many documents are complete, in progress and flagged. It also lists everyone's links, with a button to reissue one. `tater-launcher status` prints the same table in the terminal. `--host`, `--port` and the environment variables `TATER_LAUNCHER_HOST` / `TATER_LAUNCHER_PORT` set the address. Set `public_url` in the project file when people reach the launcher at a different address, such as through a proxy. The printed links then use it.
+
+### Where things are
+
+```
+project.yaml
+project.launcher/                # the launcher's state: link secrets and a status file. Keep it private.
+results/
+  alice/annotations.json         # alice's annotations, in the usual format
+  alice/tater.log                # her process's output
+  bob/...
+```
+
+The results files are ordinary tater annotation files. `results/` can be copied or shared without exposing anyone's link.
+
+### Processes and memory
+
+An annotator's process starts on their first request and stops after `idle_minutes` without one. Their edits are saved as it stops. When they come back, their next click starts it again, which takes about a second, or 1.5 s at 10,000 documents. The open page carries on without a reload. A process that crashes is restarted on the annotator's next request. After three crashes in ten minutes, the launcher stops trying, and `tater.log` says why.
+
+Only annotators who are working use memory. Measured with the realistic synthetic project in `perf/`:
+
+| Project size | Memory per working annotator |
+|---|---|
+| 500 documents | about 120 MB |
+| 10,000 documents, new project | about 165 MB |
+| 10,000 documents, fully annotated | about 245 MB |
+
+The launcher itself takes about 70 MB. For example, five people working at once on a 10,000-document project need about 1.3 GB; twenty need about 5 GB.
+
+### Who can get in
+
+There are two ways to say who someone is:
+
+- **Personal links** (the default, `identity: links`). A link works like a password: send it privately, and reissue it if it leaks. This suits data that isn't sensitive, or a server that only the right people can reach anyway.
+- **A login service in front** (`identity: header`). Use this for sensitive data. Examples of a login service are a campus single sign-on proxy, a cloud platform's built-in sign-in, or a tunnel with access control. It sends each visitor's email in a header, and the launcher matches that email against the annotator list:
+
+  ```yaml
+  identity: header
+  header: X-Forwarded-Email
+  annotators:
+    - {name: alice, email: alice@example.org}
+    - {name: bob, email: bob@example.org}
+  admins:
+    - {name: dana, email: dana@example.org}
+  ```
+
+  The launcher trusts that header completely. So it must be reachable *only* through the login service, and the service must remove the header from visitors' requests. By default, in header mode the launcher refuses to listen anywhere but 127.0.0.1. Run it on the same machine as the proxy. If the platform guarantees that only the login service can reach the launcher, as some container platforms with built-in sign-in do, start it with `--behind-login-proxy` to listen on another address.
+
+In either mode, a visitor who isn't on the list gets a "not part of this project" page, never anyone's work. Each annotator's process listens only on 127.0.0.1 and refuses requests that don't come from the launcher, so other users of a shared server can't connect to it directly.
+
+The launcher speaks plain HTTP. Encryption comes from what's in front of it.
+
+### Where to run it
+
+The launcher works the same everywhere. What changes is what's in front of it, and that depends on the data. Any deployment needs:
+
+- encryption in transit, from a VPN, a reverse proxy with TLS, or the platform
+- a login service for anything sensitive
+- results on a disk that survives restarts
+
+| Where | In front of it (examples) | Data it suits |
+|---|---|---|
+| Your own machine | A temporary tunnel; personal links | Public or synthetic data, short runs |
+| A lab server or virtual machine | The institution's VPN; a reverse proxy with TLS and a login; a tunnel with access control | Internal data; sensitive data when the server and the login are approved for it |
+| A container platform | The platform's own sign-in; a mounted disk for `results/` | Whatever the platform is approved for |
+
+For sensitive data, start from an approved server behind the institution's VPN or sign-on. Avoid a tunnel through a third party that can read the traffic. On a container platform, run a single instance (the launcher keeps its processes in one place), and mount the project folder on persistent storage.
+
+### Notebook hubs
+
+Some institutions run a notebook hub, such as JupyterHub, that signs people in and gives each person their own server. There, the launcher may not be needed. Each annotator runs tater in their own notebook with `tater.annotate()` (see [Jupyter notebooks](#jupyter-notebooks)), on documents the admin puts in their home folder, and the hub already keeps people apart. The admin then collects each person's annotations file. We haven't tried this on a real hub yet.
+
 ## Hosted mode
 
-Hosted mode lets multiple users upload their own schema and documents and annotate independently — no server-side annotation state is kept between sessions.
+Hosted mode lets multiple users upload their own schema and documents and annotate independently — no server-side annotation state is kept between sessions. It suits demos and occasional users. For a project with a team of annotators, use [the launcher](#running-a-project-with-several-annotators).
 
 ```bash
 tater --hosted --host 0.0.0.0 --port 8050

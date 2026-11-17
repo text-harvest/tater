@@ -11,6 +11,9 @@ _STYLE = """
 body { font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; }
 main { max-width: 960px; margin: 48px auto; padding: 0 16px; }
 h1 { font-size: 20px; margin: 0 0 12px; }
+h2 { font-size: 16px; margin: 32px 0 8px; }
+.muted { color: var(--muted); font-size: 13px; }
+form { margin: 0; }
 p { color: var(--muted); }
 table { border-collapse: collapse; width: 100%; font-size: 14px; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }

@@ -464,6 +464,40 @@ class TestLauncherApp:
         alice, _ = _join(app, tokens["alice"])
         assert alice.get("/_launcher/").status_code == 403
 
+    def test_admin_page_shows_progress_and_links(self, launcher, project_dir):
+        app, tokens, *_ = launcher
+        _write_results(project_dir / "results" / "alice" / "annotations.json",
+                       {"d0": ("complete", True), "d1": ("in_progress", False)})
+        dana, _ = _join(app, tokens["dana"])
+        html = dana.get("/_launcher/").text
+        assert "<th class=num>Complete</th>" in html
+        alice_row = html[html.index("<td>alice</td>"):].split("</tr>")[0]
+        assert [c for c in _cells(alice_row)][3:7] == ["3", "1", "1", "1"]
+        assert f"/join/{tokens['bob']}" in html
+        assert 'action="/_launcher/reissue/bob"' in html
+        assert 'action="/_launcher/reissue/dana"' not in html  # not your own
+
+    def test_reissue_from_admin_page(self, launcher):
+        app, tokens, links, _ = launcher
+        alice, _ = _join(app, tokens["alice"])
+        dana, _ = _join(app, tokens["dana"])
+        resp = dana.post("/_launcher/reissue/alice", headers={"Origin": "http://localhost"})
+        assert resp.status_code == 303 and resp.headers["Location"] == "/_launcher/"
+        assert links.ensure_all()["alice"] != tokens["alice"]
+        assert alice.get("/").status_code == 403
+        assert links.ensure_all()["alice"] in dana.get("/_launcher/").text
+
+    def test_reissue_refuses_cross_site_and_non_admins(self, launcher):
+        app, tokens, links, _ = launcher
+        dana, _ = _join(app, tokens["dana"])
+        alice, _ = _join(app, tokens["alice"])
+        assert dana.post("/_launcher/reissue/bob").status_code == 403  # no Origin
+        assert dana.post("/_launcher/reissue/bob", headers={"Origin": "https://evil.example"}).status_code == 403
+        assert alice.post("/_launcher/reissue/bob", headers={"Origin": "http://localhost"}).status_code == 403
+        assert dana.post("/_launcher/reissue/dana", headers={"Origin": "http://localhost"}).status_code == 400
+        assert dana.post("/_launcher/reissue/zed", headers={"Origin": "http://localhost"}).status_code == 404
+        assert links.ensure_all()["bob"] == tokens["bob"]
+
     def test_health(self, launcher):
         app, *_ = launcher
         assert app.test_client().get("/_launcher/health").data == b"ok\n"
@@ -496,3 +530,93 @@ class TestStartRefusal:
         path = write(project_dir, HEADER_PROJECT)
         assert launcher_main(["start", str(path), "--host", "0.0.0.0", "--port", "0"]) == 2
         assert "--behind-login-proxy" in capsys.readouterr().err
+
+
+def _write_results(path: Path, docs: dict) -> None:
+    """Results file with ``{doc_id: (status, flagged)}``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        d: {"annotations": {}, "metadata": {"status": st, "flagged": fl}} for d, (st, fl) in docs.items()
+    }))
+
+
+def _cells(row_html: str) -> list[str]:
+    import re
+    return [re.sub("<[^>]+>", "", c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row_html)]
+
+
+class TestProgress:
+    def test_counts(self, project_dir):
+        from tater.launcher.progress import ProgressCounter
+        project = load_project(write(project_dir, MINIMAL))
+        _write_results(project.annotation_path("alice"), {
+            "d0": ("complete", False), "d1": ("complete", True), "d2": ("in_progress", False),
+            "gone": ("complete", True),  # no longer in the documents file: not counted
+        })
+        progress = ProgressCounter(project)
+        assert progress.counts("alice") == {"documents": 3, "complete": 2, "in_progress": 1, "flagged": 1}
+        assert progress.counts("bob") == {"documents": 1, "complete": 0, "in_progress": 0, "flagged": 0}
+
+    def test_rereads_a_changed_file(self, project_dir):
+        from tater.launcher.progress import ProgressCounter
+        project = load_project(write(project_dir, MINIMAL))
+        progress = ProgressCounter(project)
+        path = project.annotation_path("alice")
+        _write_results(path, {"d0": ("complete", False)})
+        assert progress.counts("alice")["complete"] == 1
+        _write_results(path, {"d0": ("complete", False), "d1": ("complete", False), "d2": ("in_progress", False)})
+        assert progress.counts("alice")["complete"] == 2
+
+    def test_unreadable_files(self, project_dir):
+        from tater.launcher.progress import ProgressCounter
+        project = load_project(write(project_dir, MINIMAL))
+        project.annotation_path("alice").parent.mkdir(parents=True)
+        project.annotation_path("alice").write_text("{not json")
+        (project_dir / "documents.json").write_text("[]oops")
+        assert ProgressCounter(project).counts("alice") == {
+            "documents": None, "complete": 0, "in_progress": 0, "flagged": 0}
+
+    def test_ago(self):
+        from datetime import datetime, timezone
+        from tater.launcher.progress import ago
+        now = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+        assert ago(None, now) == "—"
+        assert ago("2026-11-20T11:59:30+00:00", now) == "just now"
+        assert ago("2026-11-20T11:57:00+00:00", now) == "3 min ago"
+        assert ago("2026-11-20T09:00:00+00:00", now) == "3 h ago"
+        assert ago("2026-11-16T12:00:00+00:00", now) == "4 days ago"
+
+
+class TestStatusCommand:
+    def test_not_running(self, project_dir, capsys):
+        project = load_project(write(project_dir, MINIMAL))
+        _write_results(project.annotation_path("alice"), {"d0": ("complete", True)})
+        assert launcher_main(["status", str(project_dir / "project.yaml")]) == 0
+        out = capsys.readouterr().out
+        assert "launcher not running" in out
+        alice = next(line for line in out.splitlines() if line.startswith("alice"))
+        assert alice.split()[:8] == ["alice", "not", "running", "—", "3", "1", "0", "1"]
+
+    def test_reads_running_launchers_status(self, project_dir, capsys):
+        import os
+        project = load_project(write(project_dir, MINIMAL))
+        project.state_dir.mkdir()
+        (project.state_dir / "status.json").write_text(json.dumps({
+            "pid": os.getpid(), "url": "http://127.0.0.1:8050", "running": True, "updated": "now",
+            "annotators": {"alice": {"state": "running", "last_request": None, "starts": 1, "crashes": 0}},
+        }))
+        launcher_main(["status", str(project_dir / "project.yaml")])
+        out = capsys.readouterr().out
+        assert "launcher running at http://127.0.0.1:8050" in out
+        assert next(l for l in out.splitlines() if l.startswith("alice")).split()[1] == "running"
+        assert next(l for l in out.splitlines() if l.startswith("bob")).split()[1] == "stopped"
+
+    def test_ignores_status_of_a_stopped_or_dead_launcher(self, project_dir, capsys):
+        from tater.launcher.progress import read_status_file
+        project = load_project(write(project_dir, MINIMAL))
+        project.state_dir.mkdir()
+        path = project.state_dir / "status.json"
+        path.write_text(json.dumps({"pid": 1, "running": False, "annotators": {}}))
+        assert read_status_file(project) is None
+        path.write_text(json.dumps({"pid": 2 ** 22 + 12345, "running": True, "annotators": {}}))
+        assert read_status_file(project) is None

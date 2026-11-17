@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="port to listen on (default 8050, or TATER_LAUNCHER_PORT)")
     start.add_argument("--behind-login-proxy", action="store_true", help=BEHIND_LOGIN_PROXY_HELP)
 
+    status = sub.add_parser("status", help="show each annotator's process and progress")
+    status.add_argument("project", help="the project file (YAML)")
+
     links = sub.add_parser("links", help="print each person's link (links mode)")
     links.add_argument("project", help="the project file (YAML)")
     links.add_argument("names", nargs="*", help="only these people")
@@ -86,6 +89,19 @@ def cmd_check(args) -> int:
     for line in check_project(project):
         print(line)
     print("ok")
+    return 0
+
+
+def cmd_status(args) -> int:
+    from tater.launcher.progress import ProgressCounter, format_table, read_status_file, status_rows
+    project = load_project(args.project)
+    status = read_status_file(project)
+    if status:
+        print(f"{project.file.title}: launcher running at {status.get('url')} (pid {status.get('pid')}), "
+              f"status as of {status.get('updated')}\n")
+    else:
+        print(f"{project.file.title}: launcher not running\n")
+    print(format_table(status_rows(project, status, ProgressCounter(project))))
     return 0
 
 
@@ -170,7 +186,7 @@ def cmd_start(args) -> int:
     return 0
 
 
-COMMANDS = {"check": cmd_check, "start": cmd_start, "links": cmd_links, "reissue": cmd_reissue}
+COMMANDS = {"check": cmd_check, "start": cmd_start, "status": cmd_status, "links": cmd_links, "reissue": cmd_reissue}
 
 
 def main(argv: list[str] | None = None) -> int:

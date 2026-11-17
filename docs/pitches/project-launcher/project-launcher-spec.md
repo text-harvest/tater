@@ -99,7 +99,7 @@ New console script in `pyproject.toml`: `tater-launcher = "tater.launcher.cli:ma
 | `tater-launcher start PROJECT [--host H] [--port P] [--behind-login-proxy]` | Runs the launcher. Defaults `127.0.0.1:8050`, or `TATER_LAUNCHER_HOST` / `TATER_LAUNCHER_PORT`. Prints the links (links mode) or the address (header mode). |
 | `tater-launcher links PROJECT [NAME ...]` | Prints `name  url` for annotators and admins, creating tokens that don't exist yet. Re-running prints the same links. |
 | `tater-launcher reissue PROJECT NAME` | New token, generation + 1; prints the new link. |
-| `tater-launcher status PROJECT` | Table: annotator, state, last request, documents, complete, in progress, results file. Reads `status.json` (if a launcher is running) and the results files. |
+| `tater-launcher status PROJECT` | Table: annotator, state, last request, documents, complete, in progress, flagged, results file. Reads `status.json` (only if its launcher is still running: `running` is true and its pid is alive; otherwise every state shows `not running`) and the results files. |
 
 Links are `{public_url or http://host:port}/join/{token}`. Tokens are `secrets.token_urlsafe(24)`.
 
@@ -114,7 +114,8 @@ tater/launcher/
   supervisor.py   # Child, Supervisor: start, ready check, stop, idle and crash monitor, status.json
   proxy.py        # forward(request, child) -> Response
   app.py          # create_app(project, supervisor, ...) -> Flask; routes and launcher pages
-  pages.py        # small inline-HTML pages: not part of project, couldn't start, status
+  progress.py     # ProgressCounter (counts cached by file stamp), status_rows, read_status_file, table formatting
+  pages.py        # small inline-HTML pages: not part of project, bad link, couldn't start
 ```
 
 The launcher is a plain Flask app (Flask is installed with Dash) served by Werkzeug's threaded server, as tater is. Forwarding uses `requests` (also installed with Dash) through one `requests.Session` per child, for connection reuse. No new dependencies.
@@ -178,7 +179,7 @@ Nothing in the save path changes.
 
 ## Status page
 
-`/_launcher/` for admins, and `tater-launcher status` from the shell. One row per annotator: name, state, last request ("3 min ago"), documents, complete, in progress, flagged, results file path. Counts come from each results file's `metadata.status` / `flagged`, cached by file mtime (a 10,000-document file parses in well under a second). Plain server-rendered HTML with a 30 s meta refresh; no Dash. In links mode the page also lists each person's link with a "reissue" button (POST, same-origin check).
+`/_launcher/` for admins, and `tater-launcher status` from the shell. One row per annotator: name, state, last request ("3 min ago"), documents, complete, in progress, flagged, results file path. Counts come from each results file's `metadata.status` / `flagged`, cached by file mtime (a 10,000-document file parses in well under a second). Plain server-rendered HTML with a 30 s meta refresh; no Dash. In links mode the page also lists each person's link with a "reissue" button (`POST /_launcher/reissue/<name>`; the `Origin`, or failing that `Referer`, must be the launcher's own address or `public_url`). An admin can't reissue their own link from the page, since that would sign them out before they saw the new one; they use the shell. Only documents in the annotator's documents file are counted. The document an annotator is on counts as in progress, as in tater.
 
 ## Security notes (go into the docs)
 

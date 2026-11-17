@@ -216,3 +216,26 @@ class TestLauncherBrowser:
         child = sup.children["alice"]
         assert requests.get(child.url + "/", timeout=5).status_code == 403
         assert requests.post(child.url + "/_dash-update-component", json={}, timeout=5).status_code == 403
+
+    def test_admin_page_progress_and_reissue(self, make_launcher, browser_page):
+        url, project, sup, links = make_launcher("admins:\n  - name: dana\n")
+        alice = open_link(browser_page(), url, links, "alice")
+        type_note(alice, "done")
+        alice.click("#btn-next")  # leaving a document with a value marks it complete
+        wait_position(alice, 2)
+        wait_quiet(alice)
+        sup.stop("alice")  # flushes the save
+
+        old = links.ensure_all()["bob"]
+        dana = browser_page()
+        dana.goto(f"{url}/join/{links.ensure_all()['dana']}")
+        row = dana.locator("tr", has_text="alice").first
+        cells = row.locator("td").all_inner_texts()
+        # d1 complete; d2, the document alice is on, in progress
+        assert cells[1] == "stopped" and cells[3:7] == ["3", "1", "1", "0"]
+
+        dana.on("dialog", lambda d: d.accept())
+        dana.locator('form[action="/_launcher/reissue/bob"] button').click()
+        dana.wait_for_url(f"{url}/_launcher/")
+        new = links.ensure_all()["bob"]
+        assert new != old and f"/join/{new}" in dana.content()

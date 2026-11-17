@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 tater = "tater.ui.runner:main"
+tater-launcher = "tater.launcher.cli:main"
 
 [build-system]
 requires = ["hatchling"]

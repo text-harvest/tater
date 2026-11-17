@@ -34,6 +34,9 @@ tater/                  # Library package
     gallery/            # meta.json + schema.json + documents.json
     hierarchical/       # meta.json + schema.json + documents.json + pet_ontology.yaml
     coarse_breast_label/ # meta.json + schema.json + documents.json + breast_fdx_ontology.yaml
+  launcher/             # tater-launcher (#82): one single-mode tater per annotator behind one
+                        #   address. project.py (YAML project file), supervisor.py (processes),
+                        #   identity.py (links/cookies/header), proxy.py, app.py (Flask), cli.py
   widgets/              # All widget classes
     base.py             # Widget base class hierarchy (see Widget conventions)
     repeater.py         # RepeaterWidget (abstract), ListableWidget, TabsWidget
@@ -175,6 +178,22 @@ outputs, execution counts, and kernel metadata on `git add`).
   Don't make the option list depend on metadata again — re-sending 2,500 options to the Select
   cost ~120 ms per Next — and don't reintroduce per-document components with pattern-matching
   IDs: at ~2,500 docs they froze the UI for seconds per action (#107).
+
+## Project launcher
+
+`tater-launcher check|start|links|reissue PROJECT.yaml` runs one project for several annotators
+(#82; design in `docs/pitches/project-launcher/`). Each annotator gets an ordinary single-mode
+tater subprocess (`python -m tater.ui.runner`, on 127.0.0.1, started on their first request,
+stopped after `idle_minutes`), and the launcher forwards each request to the caller's process.
+Identity is a personal link (`/join/<token>` sets a signed cookie; `reissue` bumps a generation
+that invalidates old cookies) or a header from a login service in front (`identity: header`;
+refuses a non-loopback `--host` without `--behind-login-proxy`). State (signing key, links,
+`status.json`) lives in `<project>.launcher/` beside the project file; results in
+`results/<name>/annotations.json`. Tater's only launcher-specific code is in `run_single`: with
+`TATER_LAUNCHER_TOKEN` set it rejects requests lacking `X-Tater-Launcher-Token`
+(`_require_launcher_token`), so other users on a shared machine can't reach a process directly.
+Nothing in the save path is launcher-aware: stops are SIGTERM (CTRL_BREAK on Windows), which
+exits normally and flushes (#123).
 
 ## Hosted mode
 
@@ -551,6 +570,8 @@ import `perf.synthetic`).
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, `SessionCache` (least recently used eviction by count and documents, thread safety), `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
+- `test_launcher.py` — `tater-launcher`: project file validation, `check`, the launcher-token check in `run_single`, `Supervisor` with real tater subprocesses (start on demand, crash, give up after repeated crashes, idle stop, `status.json`), links/cookies/header identity, forwarding (stub server), and the launcher app via Flask's test client
+- `test_launcher_browser.py` — launcher in Playwright: annotators kept apart, strangers refused, reissued links, two tabs, idle stop keeps edits and the open page keeps working, crash then reload, header mode, direct connections to a process refused
 - `test_load.py` — `perf.load` helpers (no server): request dependencies for replay, percentiles and summaries, `Recording` JSON round-trip
 - `test_browser.py` — Playwright (pytest-playwright) browser tests: navigation, keyboard shortcuts (arrow keys on a slider move it, not the document), document selector (search, filter, status), flag, notes, annotation persistence, auto-advance, save/restore (including a page refresh), and a 2,500-doc check that bounds callback requests and bytes per Next click and checkbox tick (#107, #108), plus a `perf`-marked 10,000-doc variant. Also `TestWidgetRoundTrip` (every widget's value is saved and survives Next/Prev and a reload), `TestUnofferedValues` (saved values a widget doesn't offer survive viewing and editing, #122) and `TestHosted` (each built-in example in `tater --hosted`: edits survive reload and Next/Prev, two sessions stay separate, no JS or callback errors) `TestHostedEndedSession` (a tab whose session was evicted changes nothing and never shows another session's documents) and `TestHostedEviction` (the least recently used session is the one evicted; its user gets the session-ended notice)
 

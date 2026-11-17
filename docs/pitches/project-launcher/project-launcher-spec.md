@@ -232,7 +232,9 @@ Week two (cut from the bottom if short):
 
 If idle stops (7) are cut, the docs carry the memory sizing per enrolled annotator instead.
 
-## For confirmation
+## Confirmed choices
+
+Agreed 2026-11-17:
 
 - Separate `tater-launcher` command with subcommands, rather than new flags on `tater`. The existing CLI is flat flags; four verbs fit subcommands better.
 - YAML project file.

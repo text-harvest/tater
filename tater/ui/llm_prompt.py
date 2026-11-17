@@ -203,8 +203,8 @@ def build_llm_prompt_modal() -> dmc.Modal:
                     dmc.Text("Step 1 — copy the prompt", size="sm", fw=500),
                     dmc.CopyButton(
                         value=LLM_PROMPT,
-                        children=DashIconify(icon="fa-regular:copy"),
-                        copiedChildren=DashIconify(icon="fa-regular:check-circle"),
+                        children=DashIconify(icon="tabler:copy"),
+                        copiedChildren=DashIconify(icon="tabler:circle-check"),
                         color="gray",
                         copiedColor="dark",
                         variant="transparent",

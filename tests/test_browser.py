@@ -11,6 +11,7 @@ Run with:
     pytest tests/test_browser.py --headless      # --headed to watch
 """
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -108,18 +109,10 @@ def settle(page: Page) -> None:
     wait_quiet(page)
 
 
-def _cdn_noise(msg) -> bool:
-    """Icon fetches from the iconify CDN failing, e.g. with no network or behind a
-    proxy that blocks it. Not a tater error."""
-    text = msg.text
-    url = (msg.location or {}).get("url", "")
-    return "tabler.json" in text or "ERR_FAILED" in text and ("iconify" in url or "svg.com" in url or not url)
-
-
 def watch_errors(page: Page, errors: list) -> None:
     """Append page errors, console errors and failed callback requests to ``errors``."""
     page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
-    page.on("console", lambda m: m.type == "error" and not _cdn_noise(m)
+    page.on("console", lambda m: m.type == "error"
             and errors.append(f"console: {m.text[:200]}"))
     page.on("response", lambda r: "_dash-update-component" in r.url and r.status >= 400
             and errors.append(f"callback HTTP {r.status}"))
@@ -1353,3 +1346,51 @@ class TestHostedEviction:
     def test_ended_session_shows_notice(self, eviction_run):
         assert eviction_run["b_upload_page"]
         assert eviction_run["b_notice"] and "session has ended" in eviction_run["b_notice"]
+
+
+# ---------------------------------------------------------------------------
+# Icons come from tater, not the iconify CDN, and pages make no outside requests (#82)
+# ---------------------------------------------------------------------------
+
+ICON_HOSTS = re.compile(r"https?://(api\.iconify\.design|api\.simplesvg\.com|api\.unisvg\.com)/")
+
+
+def _outside_requests(page: Page) -> list:
+    """Abort and record any request to the icon services; record any other request that
+    leaves the machine."""
+    fetched = []
+    page.route(ICON_HOSTS, lambda route: (fetched.append(route.request.url), route.abort()))
+    page.on("request", lambda r: not re.match(r"(https?://(127\.0\.0\.1|localhost)[:/]|data:|blob:)", r.url)
+            and not ICON_HOSTS.match(r.url) and fetched.append(r.url))
+    return fetched
+
+
+def _missing_icons(page: Page) -> int:
+    """dash-iconify elements that didn't render an SVG."""
+    return page.evaluate("""() => [...document.querySelectorAll('.iconify, [class*="iconify"]')]
+        .filter(el => el.tagName.toLowerCase() !== 'svg' && !el.querySelector('svg')).length""")
+
+
+class TestIcons:
+    def test_annotation_page_icons_without_network(self, page, serve, tater):
+        fetched = _outside_requests(page)
+        page.goto(serve(tater))
+        settle(page)
+        page.click("#btn-next")  # icons in later renders too
+        settle(page)
+        assert page.locator("svg.iconify").count() >= 5
+        assert _missing_icons(page) == 0
+        assert page.locator("#btn-next svg").count() == 1
+        assert fetched == []
+
+    def test_upload_page_icons_without_network(self, page, hosted_server):
+        fetched = _outside_requests(page)
+        page.goto(hosted_server.url + "/")
+        page.wait_for_selector("svg.iconify")
+        wait_quiet(page)
+        assert page.locator("svg.iconify").count() >= 5
+        assert _missing_icons(page) == 0
+        page.get_by_text("Browse examples").click()
+        wait_quiet(page)
+        assert _missing_icons(page) == 0
+        assert fetched == []

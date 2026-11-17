@@ -679,6 +679,8 @@ The launcher works the same everywhere. What changes is what's in front of it, a
 | A lab server or virtual machine | The institution's VPN; a reverse proxy with TLS and a login; a tunnel with access control | Internal data; sensitive data when the server and the login are approved for it |
 | A container platform | The platform's own sign-in; a mounted disk for `results/` | Whatever the platform is approved for |
 
+Tater's pages make no requests beyond the server they come from (it serves its own icons), so a server without internet access works.
+
 For sensitive data, start from an approved server behind the institution's VPN or sign-on. Avoid a tunnel through a third party that can read the traffic. On a container platform, run a single instance (the launcher keeps its processes in one place), and mount the project folder on persistent storage.
 
 ### Notebook hubs

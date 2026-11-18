@@ -8,6 +8,9 @@
  * The project launcher marks its own refusals with an X-Tater-Launcher header:
  * "signed-out" (the person's link was reissued, or they're no longer in the project)
  * or "unavailable" (their tater process couldn't be started or reached).
+ * Hosted mode marks a request from a session it no longer holds with
+ * X-Tater-Session: ended. Its annotations live only in this page, so that message
+ * says to download them first and offers no Reload button.
  */
 (function () {
     if (!window.fetch || window._taterRequestGuard) return;
@@ -18,6 +21,9 @@
                       "Open your current link to carry on.",
         "unavailable": "Your session stopped unexpectedly and your last change wasn't saved. " +
                        "Reload the page to carry on.",
+        "session-ended": "Your session has ended (the server keeps a limited number), so changes " +
+                         "aren't reaching it. Your annotations are still in this page: download them " +
+                         "(the download button at the bottom right) before you reload or close it.",
         "network": "Tater can't reach its server, so your changes aren't being saved. " +
                    "Reload the page once it's running again.",
         "error": "Your last change couldn't be saved (error {status}). Reload the page to carry on."
@@ -39,7 +45,7 @@
         var text = document.createElement("span");
         text.textContent = MESSAGES[kind].replace("{status}", status);
         bar.appendChild(text);
-        if (kind !== "signed-out") {
+        if (kind !== "signed-out" && kind !== "session-ended") {
             var btn = document.createElement("button");
             btn.type = "button";
             btn.textContent = "Reload";
@@ -63,6 +69,7 @@
         return request.then(function (response) {
             if (!response.ok) {
                 var mark = response.headers.get("X-Tater-Launcher");
+                if (response.headers.get("X-Tater-Session") === "ended") mark = "session-ended";
                 showBanner(MESSAGES[mark] ? mark : "error", response.status);
             }
             return response;

@@ -745,7 +745,9 @@ about five such sessions. These figures come from the synthetic "realistic" proj
 
 **Session limits.** When there are more than `TATER_SESSION_CACHE_MAX` sessions (default
 `100`) or more than `TATER_SESSION_DOCS_MAX` documents across them (default `200000`), the
-least recently used session is dropped, and its user sees a notice on their next page load.
+least recently used session is dropped. If its user still has the page open, their next action
+shows a banner telling them to download their annotations (still in the page) before reloading;
+a reload shows a notice that the session has ended.
 The document limit is what bounds memory; match it to the instance, at about 5 MB per 1,000
 documents:
 

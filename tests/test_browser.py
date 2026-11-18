@@ -1256,7 +1256,8 @@ class TestHostedEndedSession:
     ):
         """Callbacks are registered by the first session's TaterApp. A request from a
         session that has gone used to fall back to it: B's Next showed A's documents,
-        from another project, and B's edits changed A's copy. Now it changes nothing."""
+        from another project, and B's edits changed A's copy. Now it changes nothing,
+        and the banner tells B to download their annotations, which still works."""
         contexts = []
 
         def open_session(example: str) -> Session:
@@ -1280,7 +1281,20 @@ class TestHostedEndedSession:
 
             assert b.page.locator("#document-content").inner_text() == b_text
             assert position(b.page) == b_pos
-            assert b.errors == []
+            # Only the refusal itself: the 410, and Dash logging it to the console.
+            assert [e for e in b.errors
+                    if "410" not in e and "session has ended" not in e] == []
+
+            banner = b.page.locator(BANNER)
+            expect(banner).to_be_visible()
+            assert banner.get_attribute("data-kind") == "session-ended"
+            assert "download" in banner.inner_text()
+            assert banner.get_by_role("button").count() == 0  # no Reload: it loses the work
+
+            with b.page.expect_download() as dl:
+                b.page.locator("#btn-download").click()
+            saved = json.loads(Path(dl.value.path()).read_text())
+            assert saved  # B's own documents, from the page
 
             b.page.reload()  # the session is gone: back to the upload page
             expect(b.page.get_by_text("Browse examples")).to_be_visible()

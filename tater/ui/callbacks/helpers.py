@@ -6,7 +6,8 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 from dash import Patch, html, no_update
-from dash.exceptions import PreventUpdate
+from flask import make_response
+from werkzeug.exceptions import abort
 from tater.ui import value_helpers
 from tater.ui.constants import STATUS_COLORS, STATUS_LABELS
 from tater.widgets.base import ContainerWidget, ControlWidget
@@ -25,6 +26,15 @@ logger = logging.getLogger(__name__)
 # Session resolution
 # ---------------------------------------------------------------------------
 
+SESSION_HEADER = "X-Tater-Session"
+
+
+def _session_ended_response():
+    resp = make_response("This annotation session has ended\n", 410)
+    resp.headers[SESSION_HEADER] = "ended"
+    return resp
+
+
 def session_resolver(tater_app: TaterApp) -> Callable[[], TaterApp]:
     """Return ``_ta()``: the TaterApp a callback request should act on.
 
@@ -33,9 +43,10 @@ def session_resolver(tater_app: TaterApp) -> Callable[[], TaterApp]:
     registered once, by the first session's TaterApp, so *tater_app* here is
     that session; falling back to it would show one user another user's
     documents and apply their edits to it. When the caller's session is gone
-    (evicted, or the server restarted under an open tab), ``_ta()`` raises
-    ``PreventUpdate`` instead, so the request reads and changes nothing. The
-    browser still holds the user's annotations, and Download doesn't need the
+    (evicted, or the server restarted under an open tab), ``_ta()`` ends the
+    request with a 410 marked ``X-Tater-Session: ended`` instead, so it reads and
+    changes nothing, and ``request_guard.js`` tells the user to download their
+    annotations: the browser still holds them, and Download doesn't need the
     session.
 
     Call ``_ta()`` only inside callback bodies, never at registration.
@@ -47,8 +58,8 @@ def session_resolver(tater_app: TaterApp) -> Callable[[], TaterApp]:
     def _ta() -> TaterApp:
         current = get_current()
         if current is None:
-            logger.warning("tater: callback for a hosted session that has ended; ignored")
-            raise PreventUpdate
+            logger.warning("tater: callback for a hosted session that has ended; refused")
+            abort(_session_ended_response())
         return current
 
     return _ta

@@ -278,6 +278,19 @@ def tater_slider(tmp_path, docs_file):
     app.flush_saves()
 
 
+class RangeSchema(BaseModel):
+    span: Optional[List[int]] = None
+
+
+@pytest.fixture
+def tater_range(tmp_path, docs_file):
+    app = TaterApp(title="Range", schema_model=RangeSchema, annotations_path=str(tmp_path / "ann_range.json"))
+    app.load_documents(docs_file)
+    app.set_annotation_widgets([RangeSliderWidget("span", label="Span", min_value=0, max_value=100, step=10)])
+    yield app
+    app.flush_saves()
+
+
 class TestKeyboard:
     def test_arrow_keys_navigate(self, open_app, tater_slider):
         page = open_app(tater_slider)
@@ -298,6 +311,45 @@ class TestKeyboard:
         expect(_title(page)).to_have_text("1 / 3")
         expect(thumb).to_have_attribute("aria-valuenow", "2")
         assert read_saved(tater_slider)["doc1"]["annotations"]["score"] == 2
+
+    def test_arrow_keys_on_range_slider_move_it(self, open_app, tater_range):
+        """The same for both thumbs of a range slider."""
+        page = open_app(tater_range)
+        low, high = page.locator("[role=slider]").all()
+        high.focus()
+        page.keyboard.press("ArrowLeft")
+        low.focus()
+        page.keyboard.press("ArrowRight")
+        wait_quiet(page)
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(low).to_have_attribute("aria-valuenow", "10")
+        expect(high).to_have_attribute("aria-valuenow", "90")
+        assert read_saved(tater_range)["doc1"]["annotations"]["span"] == [10, 90]
+
+    def test_arrow_keys_after_dragging_range_thumb(self, open_app, tater_range):
+        """After a drag, the range slider's root has focus, not the thumb, and Mantine's
+        RangeSlider only takes arrow keys on a thumb (Slider takes them on its root), so
+        they changed the document. keyboard.js now focuses the dragged thumb."""
+        page = open_app(tater_range)
+        low, high = page.locator("[role=slider]").all()
+
+        def drag(thumb, dx):
+            box = thumb.bounding_box()
+            x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x + dx, y, steps=5)
+            page.mouse.up()
+
+        width = page.locator("[class*=RangeSlider-track]").first.bounding_box()["width"]
+        drag(high, -width * 0.2)    # 100 -> 80
+        page.keyboard.press("ArrowLeft")
+        drag(low, width * 0.2)      # 0 -> 20
+        page.keyboard.press("ArrowRight")
+        wait_quiet(page)
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(low).to_have_attribute("aria-valuenow", "30")
+        expect(high).to_have_attribute("aria-valuenow", "70")
 
 
 # ---------------------------------------------------------------------------

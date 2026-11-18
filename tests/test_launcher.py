@@ -417,6 +417,50 @@ def _join(app, token):
     return client, resp
 
 
+CONFIG = textwrap.dedent("""\
+    import os
+    from typing import Literal
+    from pydantic import BaseModel
+    from tater.widgets import SegmentedControlWidget
+
+    class Schema(BaseModel):
+        mood: Literal["happy", "sad"] = "happy"
+
+    title = "Config project"
+    widgets = [SegmentedControlWidget("mood", label="Mood")]
+
+    def register_callbacks(app):
+        # Runs in each annotator's process, in the project folder.
+        with open("register_calls.txt", "a") as f:
+            f.write(f"token-in-env={'TATER_LAUNCHER_TOKEN' in os.environ}\\n")
+""")
+
+
+class TestConfigProject:
+    """An annotator's process started from a Python config, not a JSON schema."""
+
+    def test_config_project_serves_each_annotator(self, project_dir):
+        (project_dir / "config.py").write_text(CONFIG)
+        project = load_project(write(project_dir, MINIMAL.replace("schema: schema.json", "config: config.py")))
+        assert "config config.py: 1 fields" in check_project(project)
+        links, signer = LinkStore(project), CookieSigner(project)
+        tokens = links.ensure_all()
+        sup = Supervisor(project, ready_timeout=30, stop_timeout=10)
+        try:
+            app = create_app(project, sup, Identifier(project, links, signer), links, signer)
+            for name in ("alice", "bob"):
+                client, _ = _join(app, tokens[name])
+                assert client.get("/").status_code == 200
+                layout = client.get("/_dash-layout").text
+                assert "Config project" in layout and "Mood" in layout
+            # register_callbacks ran once per process, in the project folder, and the
+            # launcher token was already gone from the environment.
+            calls = (project_dir / "register_calls.txt").read_text().splitlines()
+            assert calls == ["token-in-env=False", "token-in-env=False"]
+        finally:
+            sup.shutdown()
+
+
 class TestLauncherApp:
     def test_stranger_gets_no_tater(self, launcher):
         app, *_ = launcher

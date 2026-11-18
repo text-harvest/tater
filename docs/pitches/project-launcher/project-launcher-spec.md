@@ -181,6 +181,10 @@ Nothing in the save path changes.
 
 `/_launcher/` for admins, and `tater-launcher status` from the shell. One row per annotator: name, state, last request ("3 min ago"), documents, complete, in progress, flagged, results file path. Counts come from each results file's `metadata.status` / `flagged`, cached by file mtime (a 10,000-document file parses in well under a second). Plain server-rendered HTML with a 30 s meta refresh; no Dash. In links mode the page also lists each person's link with a "reissue" button (`POST /_launcher/reissue/<name>`; the `Origin`, or failing that `Referer`, must be the launcher's own address or `public_url`). An admin can't reissue their own link from the page, since that would sign them out before they saw the new one; they use the shell. Only documents in the annotator's documents file are counted. The document an annotator is on counts as in progress, as in tater.
 
+## Failed requests
+
+Found in manual testing: a tab signed out by `reissue` looked unchanged, and its edits were silently dropped (Dash shows nothing when a callback request fails, outside debug mode). The same happened in single mode when the server stopped under an open tab. `tater/ui/assets/request_guard.js` wraps `fetch`: the first failed `_dash-update-component` request (network error or non-2xx) shows a banner that stays until reload. The launcher adds `X-Tater-Launcher: signed-out` to its 403 for non-GET requests and `X-Tater-Launcher: unavailable` to its 502 page, and the banner words those cases accordingly (no Reload button when signed out, since a reload can't help).
+
 ## Security notes (go into the docs)
 
 - Encryption belongs to whatever is in front (VPN, reverse proxy with TLS, platform, tunnel). The launcher speaks plain HTTP.

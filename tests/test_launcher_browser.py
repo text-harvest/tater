@@ -239,3 +239,25 @@ class TestLauncherBrowser:
         dana.wait_for_url(f"{url}/_launcher/")
         new = links.ensure_all()["bob"]
         assert new != old and f"/join/{new}" in dana.content()
+
+    def test_signed_out_tab_is_told(self, make_launcher, browser_page):
+        """A reissued link signs out an open tab; its next edit shows why it wasn't saved."""
+        url, project, sup, links = make_launcher()
+        bob = open_link(browser_page(), url, links, "bob")
+        links.reissue("bob")
+        control(bob, "note").fill("lost")
+        banner = bob.locator("#tater-request-error")
+        banner.wait_for()
+        assert banner.get_attribute("data-kind") == "signed-out"
+        assert "signed out of this project" in banner.inner_text()
+        assert banner.get_by_role("button").count() == 0  # a reload wouldn't help
+
+    def test_unavailable_process_is_told(self, make_launcher, browser_page):
+        url, project, sup, links = make_launcher()
+        page = open_link(browser_page(), url, links, "alice")
+        sup.stop("alice")
+        sup.children["alice"].state = "failed"  # as after repeated crashes
+        page.click("#btn-next")
+        banner = page.locator("#tater-request-error")
+        banner.wait_for()
+        assert banner.get_attribute("data-kind") == "unavailable"

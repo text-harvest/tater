@@ -574,7 +574,9 @@ def _setup_timing_callbacks(tater_app: TaterApp, _ta=None) -> None:
         return _update_save_status_impl(_ta(), timing_data)
 
     # Update the doc timer display every second — runs entirely in the browser so
-    # there is no server round-trip and no "Updating..." tab-title flicker.
+    # there is no server round-trip. Dash still counts it as a pending callback, so the
+    # Dash apps are created with update_title=None; otherwise the tab title would read
+    # "Updating..." for a moment every second.
     # Reads annotation_seconds_at_load from timing-store (written on doc load,
     # navigation, and pause) so it never needs to call back to Python.
     app.clientside_callback(

@@ -1394,3 +1394,77 @@ class TestIcons:
         wait_quiet(page)
         assert _missing_icons(page) == 0
         assert fetched == []
+
+
+# ---------------------------------------------------------------------------
+# A failed save is shown, not silently lost (assets/request_guard.js)
+# ---------------------------------------------------------------------------
+
+BANNER = "#tater-request-error"
+
+
+class TestRequestGuard:
+    def test_no_banner_in_normal_use(self, open_app, tater):
+        page = open_app(tater)
+        _radio(page, "positive").check()
+        page.click("#btn-next")
+        settle(page)
+        assert page.locator(BANNER).count() == 0
+
+    def test_server_unreachable(self, open_app, tater):
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.abort())
+        _radio(page, "positive").check()
+        banner = page.locator(BANNER)
+        expect(banner).to_be_visible()
+        assert banner.get_attribute("data-kind") == "network"
+        expect(banner).to_contain_text("can't reach its server")
+        expect(banner.get_by_role("button", name="Reload")).to_be_visible()
+
+    def test_server_stopped(self, page, tater):
+        """Single mode: the tater server stops while a tab is open."""
+        server = make_server("127.0.0.1", 0, tater.app.server, threaded=True, request_handler=_QuietHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        page.goto(f"http://127.0.0.1:{server.server_port}")
+        settle(page)
+        server.shutdown()
+        server.server_close()
+        _radio(page, "positive").check()
+        expect(page.locator(BANNER)).to_be_visible()
+        assert page.locator(BANNER).get_attribute("data-kind") == "network"
+
+    def test_server_error(self, open_app, tater):
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.fulfill(status=500, body="boom"))
+        _radio(page, "negative").check()
+        banner = page.locator(BANNER)
+        expect(banner).to_be_visible()
+        expect(banner).to_contain_text("error 500")
+
+    def test_banner_stays_after_requests_recover(self, open_app, tater):
+        """The failed change is gone, so the banner stays until a reload."""
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.abort())
+        _radio(page, "positive").check()
+        expect(page.locator(BANNER)).to_be_visible()
+        page.unroute("**/_dash-update-component")
+        page.click("#btn-next")
+        settle(page)
+        expect(page.locator(BANNER)).to_be_visible()
+        page.reload()
+        settle(page)
+        assert page.locator(BANNER).count() == 0
+
+
+class TestTabTitle:
+    def test_title_steady_while_idle(self, open_app, tater):
+        """The 1-second timer is a Dash callback; with Dash's default update_title the
+        tab would read "Updating..." for a moment every second."""
+        page = open_app(tater)
+        page.evaluate("""() => { window._titles = [];
+            new MutationObserver(() => window._titles.push(document.title))
+              .observe(document.querySelector('title'), {childList: true, characterData: true, subtree: true}); }""")
+        page.wait_for_timeout(3500)  # three timer ticks
+        assert page.evaluate("window._titles") == []
+        assert page.title() == "tater"

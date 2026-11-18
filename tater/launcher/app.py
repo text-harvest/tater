@@ -23,6 +23,14 @@ from tater.launcher.supervisor import ChildUnavailable, Supervisor
 
 METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 
+# Tells tater's page (assets/request_guard.js) why the launcher refused a request.
+MARK_HEADER = "X-Tater-Launcher"
+
+
+def _marked(resp, mark: str):
+    resp.headers[MARK_HEADER] = mark
+    return resp
+
 
 def create_app(
     project: Project,
@@ -140,16 +148,16 @@ def create_app(
                 return redirect("/_launcher/")
             if request.method == "GET":
                 return pages.not_in_project(title)
-            return "Forbidden: not part of this project\n", 403
+            return _marked(make_response("Forbidden: not part of this project\n", 403), "signed-out")
         try:
             child = supervisor.ensure_running(name)
         except ChildUnavailable as e:
             app.logger.error(str(e))
-            return pages.unavailable(title)
+            return _marked(pages.unavailable(title), "unavailable")
         try:
             return forward(request, child, identity_header)
         except requests.ConnectionError:
             supervisor.mark_unreachable(child)
-            return pages.unavailable(title)
+            return _marked(pages.unavailable(title), "unavailable")
 
     return app

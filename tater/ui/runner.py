@@ -201,6 +201,7 @@ def run_hosted(args) -> None:
     app = Dash(
         __name__,
         title="tater",
+        update_title=None,  # see TaterApp: no "Updating..." tab title every second
         suppress_callback_exceptions=True,
         use_pages=False,
     )

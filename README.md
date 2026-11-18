@@ -630,6 +630,8 @@ The results files are ordinary tater annotation files. `results/` can be copied 
 
 ### Processes and memory
 
+If a change can't be saved (the person's link was reissued, their process can't start, or the launcher is stopped), their page shows a banner saying so, rather than carrying on as if it had worked.
+
 An annotator's process starts on their first request and stops after `idle_minutes` without one. Their edits are saved as it stops. When they come back, their next click starts it again, which takes about a second, or 1.5 s at 10,000 documents. The open page carries on without a reload. A process that crashes is restarted on the annotator's next request. After three crashes in ten minutes, the launcher stops trying, and `tater.log` says why.
 
 Only annotators who are working use memory. Measured with the realistic synthetic project in `perf/`:

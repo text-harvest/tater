@@ -174,7 +174,7 @@ class TaterApp:
         self.on_save = on_save
         self.is_hosted = is_hosted
         self.restore_annotations = restore_annotations
-        self.app = dash_app if dash_app is not None else Dash(__name__, title="tater", suppress_callback_exceptions=True)
+        self.app = dash_app if dash_app is not None else Dash(__name__, title="tater", update_title=None, suppress_callback_exceptions=True)
         # In hosted mode the shared Dash app carries a callable that resolves
         # the current user's TaterApp from the Flask session at callback runtime.
         self._get_current_app = getattr(self.app, '_tater_get_current_app', None)

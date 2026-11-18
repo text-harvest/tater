@@ -497,6 +497,9 @@ class TestLauncherApp:
         links.reissue("alice")
         assert alice.get("/").status_code == 403
         assert _join(app, tokens["alice"])[1].status_code == 403
+        # A callback request from the signed-out tab is marked, so the page can say why.
+        resp = alice.post("/_dash-update-component", json={})
+        assert resp.status_code == 403 and resp.headers["X-Tater-Launcher"] == "signed-out"
 
     def test_admin_page(self, launcher):
         app, tokens, *_ = launcher

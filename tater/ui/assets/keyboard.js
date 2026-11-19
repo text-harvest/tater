@@ -84,6 +84,29 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     });
 
+    // After a mouse drag or click, a slider's root has focus rather than a thumb.
+    // Mantine's Slider takes arrow keys on its root, but RangeSlider only on a thumb,
+    // so the keys fell through to Prev/Next above. Focus the thumb nearest the pointer
+    // (the one just moved, which follows the pointer), so arrow keys keep adjusting it.
+    // Synchronously: a key pressed right after the release must already find it focused.
+    // The slider is taken from the press, since a drag can end off the slider.
+    let pressedRange = null;
+    document.addEventListener('pointerdown', function (e) {
+        pressedRange = e.target.closest ? e.target.closest('.mantine-RangeSlider-root') : null;
+    }, true);
+    document.addEventListener('pointerup', function (e) {
+        const root = pressedRange;
+        pressedRange = null;
+        if (!root) return;
+        let nearest = null, best = Infinity;
+        root.querySelectorAll('[role="slider"]').forEach(function (thumb) {
+            const r = thumb.getBoundingClientRect();
+            const d = Math.abs(r.left + r.width / 2 - e.clientX);
+            if (d < best) { best = d; nearest = thumb; }
+        });
+        if (nearest) nearest.focus({ preventScroll: true });
+    }, true);
+
     // Reset scroll to top whenever the document content changes (i.e. user navigates)
     function attachScrollReset() {
         const el = document.getElementById('document-content');

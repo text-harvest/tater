@@ -379,9 +379,15 @@ class TestSessionResolver:
         assert session_resolver(self._app(lambda: other))() is other
 
     def test_hosted_ended_session_never_falls_back(self):
-        """The registering (first) session must not stand in for a session that has gone."""
-        from dash.exceptions import PreventUpdate
+        """The registering (first) session must not stand in for a session that has gone.
+        The request is refused with a 410 marked for request_guard.js."""
+        import flask
+        from werkzeug.exceptions import HTTPException
         from tater.ui.callbacks.helpers import session_resolver
         ta = session_resolver(self._app(lambda: None))
-        with pytest.raises(PreventUpdate):
-            ta()
+        with flask.Flask(__name__).test_request_context():
+            with pytest.raises(HTTPException) as exc:
+                ta()
+        resp = exc.value.get_response()
+        assert resp.status_code == 410
+        assert resp.headers["X-Tater-Session"] == "ended"

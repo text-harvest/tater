@@ -11,6 +11,7 @@ Run with:
     pytest tests/test_browser.py --headless      # --headed to watch
 """
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -108,18 +109,10 @@ def settle(page: Page) -> None:
     wait_quiet(page)
 
 
-def _cdn_noise(msg) -> bool:
-    """Icon fetches from the iconify CDN failing, e.g. with no network or behind a
-    proxy that blocks it. Not a tater error."""
-    text = msg.text
-    url = (msg.location or {}).get("url", "")
-    return "tabler.json" in text or "ERR_FAILED" in text and ("iconify" in url or "svg.com" in url or not url)
-
-
 def watch_errors(page: Page, errors: list) -> None:
     """Append page errors, console errors and failed callback requests to ``errors``."""
     page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
-    page.on("console", lambda m: m.type == "error" and not _cdn_noise(m)
+    page.on("console", lambda m: m.type == "error"
             and errors.append(f"console: {m.text[:200]}"))
     page.on("response", lambda r: "_dash-update-component" in r.url and r.status >= 400
             and errors.append(f"callback HTTP {r.status}"))
@@ -285,6 +278,19 @@ def tater_slider(tmp_path, docs_file):
     app.flush_saves()
 
 
+class RangeSchema(BaseModel):
+    span: Optional[List[int]] = None
+
+
+@pytest.fixture
+def tater_range(tmp_path, docs_file):
+    app = TaterApp(title="Range", schema_model=RangeSchema, annotations_path=str(tmp_path / "ann_range.json"))
+    app.load_documents(docs_file)
+    app.set_annotation_widgets([RangeSliderWidget("span", label="Span", min_value=0, max_value=100, step=10)])
+    yield app
+    app.flush_saves()
+
+
 class TestKeyboard:
     def test_arrow_keys_navigate(self, open_app, tater_slider):
         page = open_app(tater_slider)
@@ -305,6 +311,45 @@ class TestKeyboard:
         expect(_title(page)).to_have_text("1 / 3")
         expect(thumb).to_have_attribute("aria-valuenow", "2")
         assert read_saved(tater_slider)["doc1"]["annotations"]["score"] == 2
+
+    def test_arrow_keys_on_range_slider_move_it(self, open_app, tater_range):
+        """The same for both thumbs of a range slider."""
+        page = open_app(tater_range)
+        low, high = page.locator("[role=slider]").all()
+        high.focus()
+        page.keyboard.press("ArrowLeft")
+        low.focus()
+        page.keyboard.press("ArrowRight")
+        wait_quiet(page)
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(low).to_have_attribute("aria-valuenow", "10")
+        expect(high).to_have_attribute("aria-valuenow", "90")
+        assert read_saved(tater_range)["doc1"]["annotations"]["span"] == [10, 90]
+
+    def test_arrow_keys_after_dragging_range_thumb(self, open_app, tater_range):
+        """After a drag, the range slider's root has focus, not the thumb, and Mantine's
+        RangeSlider only takes arrow keys on a thumb (Slider takes them on its root), so
+        they changed the document. keyboard.js now focuses the dragged thumb."""
+        page = open_app(tater_range)
+        low, high = page.locator("[role=slider]").all()
+
+        def drag(thumb, dx):
+            box = thumb.bounding_box()
+            x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            page.mouse.move(x, y)
+            page.mouse.down()
+            page.mouse.move(x + dx, y, steps=5)
+            page.mouse.up()
+
+        width = page.locator("[class*=RangeSlider-track]").first.bounding_box()["width"]
+        drag(high, -width * 0.2)    # 100 -> 80
+        page.keyboard.press("ArrowLeft")
+        drag(low, width * 0.2)      # 0 -> 20
+        page.keyboard.press("ArrowRight")
+        wait_quiet(page)
+        expect(_title(page)).to_have_text("1 / 3")
+        expect(low).to_have_attribute("aria-valuenow", "30")
+        expect(high).to_have_attribute("aria-valuenow", "70")
 
 
 # ---------------------------------------------------------------------------
@@ -1263,7 +1308,8 @@ class TestHostedEndedSession:
     ):
         """Callbacks are registered by the first session's TaterApp. A request from a
         session that has gone used to fall back to it: B's Next showed A's documents,
-        from another project, and B's edits changed A's copy. Now it changes nothing."""
+        from another project, and B's edits changed A's copy. Now it changes nothing,
+        and the banner tells B to download their annotations, which still works."""
         contexts = []
 
         def open_session(example: str) -> Session:
@@ -1287,7 +1333,20 @@ class TestHostedEndedSession:
 
             assert b.page.locator("#document-content").inner_text() == b_text
             assert position(b.page) == b_pos
-            assert b.errors == []
+            # Only the refusal itself: the 410, and Dash logging it to the console.
+            assert [e for e in b.errors
+                    if "410" not in e and "session has ended" not in e] == []
+
+            banner = b.page.locator(BANNER)
+            expect(banner).to_be_visible()
+            assert banner.get_attribute("data-kind") == "session-ended"
+            assert "download" in banner.inner_text()
+            assert banner.get_by_role("button").count() == 0  # no Reload: it loses the work
+
+            with b.page.expect_download() as dl:
+                b.page.locator("#btn-download").click()
+            saved = json.loads(Path(dl.value.path()).read_text())
+            assert saved  # B's own documents, from the page
 
             b.page.reload()  # the session is gone: back to the upload page
             expect(b.page.get_by_text("Browse examples")).to_be_visible()
@@ -1353,3 +1412,190 @@ class TestHostedEviction:
     def test_ended_session_shows_notice(self, eviction_run):
         assert eviction_run["b_upload_page"]
         assert eviction_run["b_notice"] and "session has ended" in eviction_run["b_notice"]
+
+
+# ---------------------------------------------------------------------------
+# Icons come from tater, not the iconify CDN, and pages make no outside requests (#82)
+# ---------------------------------------------------------------------------
+
+ICON_HOSTS = re.compile(r"https?://(api\.iconify\.design|api\.simplesvg\.com|api\.unisvg\.com)/")
+
+
+def _outside_requests(page: Page) -> list:
+    """Abort and record any request to the icon services; record any other request that
+    leaves the machine."""
+    fetched = []
+    page.route(ICON_HOSTS, lambda route: (fetched.append(route.request.url), route.abort()))
+    page.on("request", lambda r: not re.match(r"(https?://(127\.0\.0\.1|localhost)[:/]|data:|blob:)", r.url)
+            and not ICON_HOSTS.match(r.url) and fetched.append(r.url))
+    return fetched
+
+
+def _missing_icons(page: Page) -> int:
+    """dash-iconify elements that didn't render an SVG."""
+    return page.evaluate("""() => [...document.querySelectorAll('.iconify, [class*="iconify"]')]
+        .filter(el => el.tagName.toLowerCase() !== 'svg' && !el.querySelector('svg')).length""")
+
+
+class TestIcons:
+    def test_annotation_page_icons_without_network(self, page, serve, tater):
+        fetched = _outside_requests(page)
+        page.goto(serve(tater))
+        settle(page)
+        page.click("#btn-next")  # icons in later renders too
+        settle(page)
+        assert page.locator("svg.iconify").count() >= 5
+        assert _missing_icons(page) == 0
+        assert page.locator("#btn-next svg").count() == 1
+        assert fetched == []
+
+    def test_upload_page_icons_without_network(self, page, hosted_server):
+        fetched = _outside_requests(page)
+        page.goto(hosted_server.url + "/")
+        page.wait_for_selector("svg.iconify")
+        wait_quiet(page)
+        assert page.locator("svg.iconify").count() >= 5
+        assert _missing_icons(page) == 0
+        page.get_by_text("Browse examples").click()
+        wait_quiet(page)
+        assert _missing_icons(page) == 0
+        assert fetched == []
+
+
+# ---------------------------------------------------------------------------
+# A failed save is shown, not silently lost (assets/request_guard.js)
+# ---------------------------------------------------------------------------
+
+BANNER = "#tater-request-error"
+
+
+class TestRequestGuard:
+    def test_no_banner_in_normal_use(self, open_app, tater):
+        page = open_app(tater)
+        _radio(page, "positive").check()
+        page.click("#btn-next")
+        settle(page)
+        assert page.locator(BANNER).count() == 0
+
+    def test_server_unreachable(self, open_app, tater):
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.abort())
+        _radio(page, "positive").check()
+        banner = page.locator(BANNER)
+        expect(banner).to_be_visible()
+        assert banner.get_attribute("data-kind") == "network"
+        expect(banner).to_contain_text("can't reach its server")
+        expect(banner.get_by_role("button", name="Reload")).to_be_visible()
+
+    def test_server_stopped(self, page, tater):
+        """Single mode: the tater server stops while a tab is open."""
+        server = make_server("127.0.0.1", 0, tater.app.server, threaded=True, request_handler=_QuietHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        page.goto(f"http://127.0.0.1:{server.server_port}")
+        settle(page)
+        server.shutdown()
+        server.server_close()
+        _radio(page, "positive").check()
+        expect(page.locator(BANNER)).to_be_visible()
+        assert page.locator(BANNER).get_attribute("data-kind") == "network"
+
+    def test_server_error(self, open_app, tater):
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.fulfill(status=500, body="boom"))
+        _radio(page, "negative").check()
+        banner = page.locator(BANNER)
+        expect(banner).to_be_visible()
+        expect(banner).to_contain_text("error 500")
+
+    def test_banner_stays_after_requests_recover(self, open_app, tater):
+        """The failed change is gone, so the banner stays until a reload."""
+        page = open_app(tater)
+        page.route("**/_dash-update-component", lambda route: route.abort())
+        _radio(page, "positive").check()
+        expect(page.locator(BANNER)).to_be_visible()
+        page.unroute("**/_dash-update-component")
+        page.click("#btn-next")
+        settle(page)
+        expect(page.locator(BANNER)).to_be_visible()
+        page.reload()
+        settle(page)
+        assert page.locator(BANNER).count() == 0
+
+
+class TestTabTitle:
+    def test_title_steady_while_idle(self, open_app, tater):
+        """The 1-second timer is a Dash callback; with Dash's default update_title the
+        tab would read "Updating..." for a moment every second."""
+        page = open_app(tater)
+        page.evaluate("""() => { window._titles = [];
+            new MutationObserver(() => window._titles.push(document.title))
+              .observe(document.querySelector('title'), {childList: true, characterData: true, subtree: true}); }""")
+        page.wait_for_timeout(3500)  # three timer ticks
+        assert page.evaluate("window._titles") == []
+        assert page.title() == "tater"
+
+
+# ---------------------------------------------------------------------------
+# apps/examples/config/hooks.py: on_save and the escape-hatch callback
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tater_hooks(tmp_path, docs_file):
+    """hooks.py, set up as ``run_single`` does."""
+    from tater.ui.config_loader import load_config_module
+    config = load_config_module(str(Path(__file__).parent.parent / "apps/examples/config/hooks.py"))
+    app = TaterApp(title=config["title"], schema_model=config["schema_model"],
+                   annotations_path=str(tmp_path / "ann_hooks.json"))
+    app.load_documents(docs_file)
+    app.set_annotation_widgets(config["widgets"])
+    config["register_callbacks"](app)
+    yield app
+    app.flush_saves()
+
+
+class TestHooksExample:
+    def _mood(self, page, mood):
+        _ctl(page, "pet_mood").get_by_text(mood, exact=True).click()
+        wait_quiet(page)
+
+    def _attention(self, page, on):
+        box = _ctl(page, "needs_attention")
+        box.check() if on else box.uncheck()
+        wait_quiet(page)
+
+    def test_unticking_clears_mood(self, open_app, tater_hooks, errors):
+        page = open_app(tater_hooks)
+        self._attention(page, True)
+        self._mood(page, "anxious")
+        self._attention(page, False)
+        assert read_saved(tater_hooks)["doc1"]["annotations"] == {"pet_mood": None, "needs_attention": False}
+        assert errors == []
+
+    def test_moving_between_documents_keeps_moods(self, open_app, tater_hooks, errors):
+        """Loading a document writes the checkbox, which used to fire the rule: every
+        document with a mood and the box unticked lost its mood when viewed."""
+        page = open_app(tater_hooks)
+        self._mood(page, "happy")                 # doc1: unticked, happy
+        _go(page, "#btn-next", 2)
+        self._attention(page, True)
+        self._mood(page, "calm")                  # doc2: ticked, calm
+        _go(page, "#btn-prev", 1)                 # ticked -> unticked
+        _go(page, "#btn-next", 2)                 # unticked -> ticked
+        _go(page, "#btn-next", 3)                 # ticked -> unticked (empty)
+        _go(page, "#btn-prev", 2)
+        _go(page, "#btn-prev", 1)
+        page.reload()                             # a refresh loads the controls too
+        settle(page)
+        expect(_ctl(page, "pet_mood").locator("input[value=happy]")).to_be_checked()
+        saved = read_saved(tater_hooks)
+        assert saved["doc1"]["annotations"] == {"pet_mood": "happy", "needs_attention": False}
+        assert saved["doc2"]["annotations"] == {"pet_mood": "calm", "needs_attention": True}
+        assert errors == []
+
+    def test_on_save_writes_audit_lines(self, open_app, tater_hooks, tmp_path):
+        page = open_app(tater_hooks)
+        self._mood(page, "calm")
+        read_saved(tater_hooks)  # flushes, so on_save has run
+        lines = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
+        assert lines[-1] == {"doc": "doc1", "pet_mood": "calm", "needs_attention": False}

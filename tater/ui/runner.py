@@ -95,6 +95,8 @@ SESSION_ENDED_NOTICE = (
 
 def run_single(args) -> None:
     """Run tater in single-user mode (existing behavior, unchanged)."""
+    # Read (and remove) before a config module runs, so its code doesn't see it.
+    launcher_token = os.environ.pop(LAUNCHER_TOKEN_ENV, None)
     if args.config:
         from tater.ui.config_loader import load_config_module
         config = load_config_module(args.config)
@@ -136,6 +138,7 @@ def run_single(args) -> None:
         restore_annotations=not args.no_restore,
     )
     _install_trace(app.app.server, args)
+    _require_launcher_token(app.app.server, launcher_token)
 
     if not app.load_documents(args.documents):
         return
@@ -145,10 +148,40 @@ def run_single(args) -> None:
     if register_callbacks is not None:
         register_callbacks(app)
 
-    # A terminated server (SIGTERM, e.g. from a process manager) exits normally, so
-    # atexit writes edits still waiting on the save interval.
+    # A terminated server (SIGTERM, e.g. from a process manager or the launcher's idle
+    # stop; CTRL_BREAK on Windows) exits normally, so atexit writes edits still waiting
+    # on the save interval.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, lambda *_: sys.exit(0))
     app.run(debug=args.debug, port=args.port, host=args.host)
+
+
+LAUNCHER_TOKEN_ENV = "TATER_LAUNCHER_TOKEN"
+LAUNCHER_TOKEN_HEADER = "X-Tater-Launcher-Token"
+
+
+def _require_launcher_token(server, token: str | None) -> None:
+    """Under the project launcher (#82), accept only requests carrying its token.
+
+    The launcher runs each annotator's tater on a local port; on a shared machine
+    other users could connect to that port directly and skip the launcher's check
+    of who they are. The launcher passes a secret in ``TATER_LAUNCHER_TOKEN`` and
+    sends it with every request it forwards. Without it, nothing is registered.
+    """
+    if not token:
+        return
+    import hmac
+    from flask import request
+
+    expected = token.encode()
+
+    @server.before_request
+    def _check_launcher_token():
+        given = request.headers.get(LAUNCHER_TOKEN_HEADER, "").encode()
+        if not hmac.compare_digest(given, expected):
+            return "Forbidden: open this project through its launcher.\n", 403
+
 
 
 def _install_trace(server, args) -> None:
@@ -168,6 +201,7 @@ def run_hosted(args) -> None:
     app = Dash(
         __name__,
         title="tater",
+        update_title=None,  # see TaterApp: no "Updating..." tab title every second
         suppress_callback_exceptions=True,
         use_pages=False,
     )
@@ -320,3 +354,7 @@ def _covers_all_fields(widgets: list, schema_model) -> bool:
     """Return True if widgets account for every top-level model field."""
     covered = {w.schema_field for w in widgets}
     return covered >= set(schema_model.model_fields.keys())
+
+
+if __name__ == "__main__":
+    main()

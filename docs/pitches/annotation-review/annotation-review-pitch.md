@@ -1,6 +1,6 @@
 # Combining annotators' work and resolving disagreements
 
-*A pitch for discussion: the open questions below are meant to be argued about before any building starts. It's the second half of [#39](https://github.com/text-harvest/tater/issues/39); the first half, sharing documents out, is pitched separately.*
+*A pitch for discussion: the open questions below are meant to be argued about before any building starts. It began as the second half of [#39](https://github.com/text-harvest/tater/issues/39), which now covers the first half, sharing documents out.*
 
 ## Problem
 
@@ -84,6 +84,6 @@ Because it's ordinary tater, a reviewer is just another kind of person in the la
 
 ## No-gos
 
-- Sharing documents out in the first place: the first pitch.
+- Sharing documents out in the first place: [#39](https://github.com/text-harvest/tater/issues/39).
 - Changing what annotators see while they annotate. Annotators never see each other's work.
 - Training or evaluating models against the final annotations. The combined and final files are the hand-off.

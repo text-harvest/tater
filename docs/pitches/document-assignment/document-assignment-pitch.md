@@ -45,7 +45,7 @@ Within any of these, annotators can be **weighted**: a part-timer gets half a sh
 Alongside the files, the dicer writes down the assignment: for each document, who has it, and whether it's an overlap document or someone's own. This record is what makes the rest safe:
 
 - **Re-running is safe.** Given the record, the dicer keeps every existing assignment and only places what's new. Adding documents spreads them across the current annotators. Adding an annotator gives them new documents, and optionally takes some documents that nobody has started from the others. It never moves a document someone has already worked on, which it can tell from their annotations file if it's given one.
-- **Merging knows the design.** Combining the results later (the second half of #39, pitched separately) can read the record to know which documents were meant to be compared, rather than guessing from whatever overlaps.
+- **Merging knows the design.** Combining the results later ([#128](https://github.com/text-harvest/tater/issues/128)) can read the record to know which documents were meant to be compared, rather than guessing from whatever overlaps.
 - **Anyone can check it.** It's a plain file an admin can open and read.
 
 ### With the launcher
@@ -61,7 +61,7 @@ The launcher can use the dicer's output as it is: each annotator's `documents:` 
 - **Stratifying.** Should the split balance by a column (a source, a document type, a date range) so that everyone's share and the shared set look like the whole? Useful, but easy to over-design. One column, or nothing, at first.
 - **Order.** Should each annotator get their documents shuffled, or in the original order? Shuffling avoids everyone doing the overlap documents first (or last), which can skew agreement figures as people learn.
 - **Calibration rounds.** Some projects start with a small set everyone does, then meet, adjust the guidelines, and only then split the rest. That's two runs of the dicer with a shared record, which the record design should allow.
-- **Reviewers.** If reviewing disagreements is to be shared among several reviewers, the reviewers' shares are another split. Whether the dicer makes it, or the review tool does, depends on the second pitch.
+- **Reviewers.** If reviewing disagreements is to be shared among several reviewers, the reviewers' shares are another split. Whether the dicer makes it, or the review tool does, depends on [#128](https://github.com/text-harvest/tater/issues/128).
 - **Removing someone.** An annotator leaves partway through. Their unstarted documents go back to the pool; what about started ones? Probably reported, and left for the admin to decide.
 
 ## Rabbit holes
@@ -72,6 +72,6 @@ The launcher can use the dicer's output as it is: each annotator's `documents:` 
 
 ## No-gos
 
-- Combining annotators' results and reviewing disagreements: the second pitch.
+- Combining annotators' results and reviewing disagreements: [#128](https://github.com/text-harvest/tater/issues/128).
 - Changing how tater itself loads documents. The dicer writes ordinary documents files.
 - Live assignment while annotators work.

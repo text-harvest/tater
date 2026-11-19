@@ -133,6 +133,11 @@ check them when you upgrade. Avoid taking `annotations-store` or `metadata-store
 `Input` or `State`: those hold every document, and a callback that reads them slows every
 action on large projects.
 
+A callback on a widget's value also fires whenever tater shows a document, because tater sets
+every widget to the document's saved values; it can't tell that apart from an edit unless it
+checks. A rule that changes other fields must skip those loads, or it changes documents just
+by viewing them. `hooks.py` shows how.
+
 ## Widgets
 
 Widgets are linked to Pydantic model fields by `schema_field`. Options for choice widgets are

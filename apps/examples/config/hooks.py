@@ -9,8 +9,10 @@ Instead, ``register_callbacks`` sets ``app.on_save`` after the app is created.
 Escape hatch
 ------------
 ``register_callbacks`` also registers a Dash callback that clears ``pet_mood``
-whenever ``needs_attention`` is unchecked — a cross-field rule that can't be
-expressed as a widget declaration.  It runs after ``set_annotation_widgets``
+when the annotator unchecks ``needs_attention`` — a cross-field rule that can't be
+expressed as a widget declaration. A callback on a control's value also fires when
+a document is opened (tater sets every control to its saved value); see the
+callback for how it tells the two apart.  It runs after ``set_annotation_widgets``
 so that Tater's component IDs are already finalised.
 
 Custom Dash callbacks are experimental: they depend on Tater's internal component
@@ -69,15 +71,32 @@ def register_callbacks(app) -> None:
 
     app.on_save = _log_save
 
-    # Escape hatch: clear pet_mood when pet does not need attention.
-    from dash import Input, Output, no_update
+    # Escape hatch: clear pet_mood when the annotator unticks needs_attention.
+    #
+    # Tater also sets the checkbox whenever it shows a document (opening one, or
+    # loading the page), and that fires this callback just as a click does. Without a
+    # guard, every document with a mood and the box unticked would lose its mood just
+    # by being viewed. Two checks tell a click apart:
+    # - Opening another document: current-doc-id is an Input, so Dash waits for the
+    #   checkbox to be loaded and fires once, with current-doc-id among the triggers.
+    # - Any load: the checkbox then shows the value already saved for the document,
+    #   which current-doc-slice (the current document's annotations) holds. A click
+    #   changes it first; the saved copy catches up afterwards.
+    from dash import Input, Output, State, ctx, no_update
 
     @app.app.callback(
         Output(pet_mood.schema_id, "value", allow_duplicate=True),
         Input(needs_attention.schema_id, "checked"),
+        Input("current-doc-id", "data"),
+        State("current-doc-slice", "data"),
         prevent_initial_call=True,
     )
-    def clear_mood_when_no_attention(needs_attention):
-        if not needs_attention:
+    def clear_mood_when_no_attention(checked, _doc_id, doc_slice):
+        if "current-doc-id.data" in ctx.triggered_prop_ids:
+            return no_update  # another document was opened
+        saved = ((doc_slice or {}).get("annotations") or {}).get("needs_attention", False)
+        if bool(checked) == bool(saved):
+            return no_update  # the box shows the saved value: a load, not a click
+        if not checked:
             return None
         return no_update

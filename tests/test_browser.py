@@ -1534,3 +1534,68 @@ class TestTabTitle:
         page.wait_for_timeout(3500)  # three timer ticks
         assert page.evaluate("window._titles") == []
         assert page.title() == "tater"
+
+
+# ---------------------------------------------------------------------------
+# apps/examples/config/hooks.py: on_save and the escape-hatch callback
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tater_hooks(tmp_path, docs_file):
+    """hooks.py, set up as ``run_single`` does."""
+    from tater.ui.config_loader import load_config_module
+    config = load_config_module(str(Path(__file__).parent.parent / "apps/examples/config/hooks.py"))
+    app = TaterApp(title=config["title"], schema_model=config["schema_model"],
+                   annotations_path=str(tmp_path / "ann_hooks.json"))
+    app.load_documents(docs_file)
+    app.set_annotation_widgets(config["widgets"])
+    config["register_callbacks"](app)
+    yield app
+    app.flush_saves()
+
+
+class TestHooksExample:
+    def _mood(self, page, mood):
+        _ctl(page, "pet_mood").get_by_text(mood, exact=True).click()
+        wait_quiet(page)
+
+    def _attention(self, page, on):
+        box = _ctl(page, "needs_attention")
+        box.check() if on else box.uncheck()
+        wait_quiet(page)
+
+    def test_unticking_clears_mood(self, open_app, tater_hooks, errors):
+        page = open_app(tater_hooks)
+        self._attention(page, True)
+        self._mood(page, "anxious")
+        self._attention(page, False)
+        assert read_saved(tater_hooks)["doc1"]["annotations"] == {"pet_mood": None, "needs_attention": False}
+        assert errors == []
+
+    def test_moving_between_documents_keeps_moods(self, open_app, tater_hooks, errors):
+        """Loading a document writes the checkbox, which used to fire the rule: every
+        document with a mood and the box unticked lost its mood when viewed."""
+        page = open_app(tater_hooks)
+        self._mood(page, "happy")                 # doc1: unticked, happy
+        _go(page, "#btn-next", 2)
+        self._attention(page, True)
+        self._mood(page, "calm")                  # doc2: ticked, calm
+        _go(page, "#btn-prev", 1)                 # ticked -> unticked
+        _go(page, "#btn-next", 2)                 # unticked -> ticked
+        _go(page, "#btn-next", 3)                 # ticked -> unticked (empty)
+        _go(page, "#btn-prev", 2)
+        _go(page, "#btn-prev", 1)
+        page.reload()                             # a refresh loads the controls too
+        settle(page)
+        expect(_ctl(page, "pet_mood").locator("input[value=happy]")).to_be_checked()
+        saved = read_saved(tater_hooks)
+        assert saved["doc1"]["annotations"] == {"pet_mood": "happy", "needs_attention": False}
+        assert saved["doc2"]["annotations"] == {"pet_mood": "calm", "needs_attention": True}
+        assert errors == []
+
+    def test_on_save_writes_audit_lines(self, open_app, tater_hooks, tmp_path):
+        page = open_app(tater_hooks)
+        self._mood(page, "calm")
+        read_saved(tater_hooks)  # flushes, so on_save has run
+        lines = [json.loads(l) for l in (tmp_path / "audit.jsonl").read_text().splitlines()]
+        assert lines[-1] == {"doc": "doc1", "pet_mood": "calm", "needs_attention": False}

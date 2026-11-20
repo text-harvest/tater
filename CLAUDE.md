@@ -201,7 +201,7 @@ refuses a non-loopback `--host` without `--behind-login-proxy`). State (signing 
 `results/<name>/annotations.json`. Tater's only launcher-specific code is in `run_single`: with
 `TATER_LAUNCHER_TOKEN` set it rejects requests lacking `X-Tater-Launcher-Token`
 (`_require_launcher_token`), so other users on a shared machine can't reach a process directly.
-The launcher marks its refusals of callback requests with `X-Tater-Launcher: signed-out` or `unavailable`, which `request_guard.js` turns into a message. Nothing in the save path is launcher-aware: stops are SIGTERM (CTRL_BREAK on Windows), which
+Its request log masks `/join/<token>` (`HideLinkTokens` in `app.py`), and `start` warns when the printed links are plain HTTP to another machine (`plain_http_warning`). The launcher marks its refusals of callback requests with `X-Tater-Launcher: signed-out` or `unavailable`, which `request_guard.js` turns into a message. Nothing in the save path is launcher-aware: stops are SIGTERM (CTRL_BREAK on Windows), which
 exits normally and flushes (#123).
 
 ## Hosted mode
@@ -586,7 +586,7 @@ import `perf.synthetic`).
 - `test_parse_schema.py` — `parse_schema`, `_build_pydantic_field`, `_build_widget_from_spec`; no-widget-block → absent from list, containers, dividers, conditionals, unknown type errors
 - `test_hosted_mode.py` — `_build_session_app_from_data` (happy path, error cases, annotations preload, hierarchy injection), schema builder `_fields_to_schema` → `parse_schema` round-trip for all field types and widget variants, `SessionCache` (least recently used eviction by count and documents, thread safety), `session_resolver` (hosted mode never falls back to the first session)
 - `test_trace.py` — `install_trace`: one line per callback request with action label, sizes, status; other requests ignored
-- `test_launcher.py` — `tater-launcher`: project file validation, `check`, the launcher-token check in `run_single`, `Supervisor` with real tater subprocesses (start on demand, crash, give up after repeated crashes, idle stop, `status.json`), links/cookies/header identity, forwarding (stub server), the launcher app via Flask's test client (admin page, reissue from it), a project using a Python config, progress counts and the `status` command
+- `test_launcher.py` — `tater-launcher`: project file validation, `check`, the launcher-token check in `run_single`, `Supervisor` with real tater subprocesses (start on demand, crash, give up after repeated crashes, idle stop, `status.json`), links/cookies/header identity, forwarding (stub server), the launcher app via Flask's test client (admin page, reissue from it), a project using a Python config, progress counts and the `status` command, link tokens kept out of the request log, and the plain-HTTP warning
 - `test_launcher_browser.py` — launcher in Playwright: annotators kept apart, strangers refused, reissued links, two tabs, idle stop keeps edits and the open page keeps working, crash then reload, header mode, direct connections to a process refused, the admin page's counts and reissue button, and an open tab told when it's signed out or its process can't start
 - `test_icons.py` — every icon name used in `tater/` is a Tabler icon present in `assets/icons.js` (re-run `scripts/build_icons.py` when it fails)
 - `test_load.py` — `perf.load` helpers (no server): request dependencies for replay, percentiles and summaries, `Recording` JSON round-trip

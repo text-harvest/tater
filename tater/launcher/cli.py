@@ -7,6 +7,7 @@ import os
 import signal
 import socket
 import sys
+from urllib.parse import urlsplit
 
 from tater.launcher.project import Project, ProjectError, check_project, load_project
 
@@ -69,6 +70,19 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def plain_http_warning(base: str) -> str | None:
+    """A warning when people would open their links over unencrypted HTTP on a network."""
+    parts = urlsplit(base)
+    if parts.scheme == "https" or is_loopback(parts.hostname or ""):
+        return None
+    return (
+        f"warning: the links use plain HTTP ({base}). Anyone who can watch the network between an "
+        "annotator and the launcher can read their link or their browser's cookie and sign in as "
+        "them. Unless a VPN encrypts that traffic, put the launcher behind HTTPS (a reverse proxy, "
+        "a tunnel or the platform) and set public_url to its https:// address."
+    )
 
 
 def _print_links(project: Project, tokens: dict[str, str], base: str, only: list[str] | None = None) -> None:
@@ -167,6 +181,9 @@ def cmd_start(args) -> int:
     if links is not None:
         print("Send each person their own link (re-print them with 'tater-launcher links'):\n")
         _print_links(project, tokens, base)
+        warning = plain_http_warning(base)
+        if warning:
+            print(f"\n{warning}")
     else:
         print(f"Annotators sign in through the login service at {base}; "
               f"identity comes from the '{project.file.header}' header.")

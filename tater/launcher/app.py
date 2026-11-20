@@ -8,6 +8,8 @@ everything else       forwarded to the caller's own tater process
 """
 from __future__ import annotations
 
+import logging
+import re
 from html import escape
 from urllib.parse import urlsplit
 
@@ -32,6 +34,27 @@ def _marked(resp, mark: str):
     return resp
 
 
+_JOIN_TOKEN = re.compile(r"(/join/)[^\s?#\"']+")
+
+
+class HideLinkTokens(logging.Filter):
+    """Masks the token in ``/join/<token>`` in log lines.
+
+    The server logs every request path, so without this every link that's opened
+    would end up in the launcher's terminal and in any file its output goes to.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        masked = _JOIN_TOKEN.sub(r"\1[hidden]", message)
+        if masked != message:
+            record.msg, record.args = masked, None
+        return True
+
+
+_HIDE_LINK_TOKENS = HideLinkTokens()
+
+
 def create_app(
     project: Project,
     supervisor: Supervisor,
@@ -40,6 +63,9 @@ def create_app(
     signer: CookieSigner | None = None,
 ) -> Flask:
     app = Flask("tater.launcher")
+    # werkzeug logs each request; Flask's logger logs the path of a failed one.
+    for logger in (logging.getLogger("werkzeug"), app.logger):
+        logger.addFilter(_HIDE_LINK_TOKENS)  # a no-op if already added
     title = project.file.title
     secure_cookie = (project.file.public_url or "").startswith("https://")
     identity_header = project.file.header if project.file.identity == "header" else None

@@ -667,3 +667,54 @@ class TestStatusCommand:
         assert read_status_file(project) is None
         path.write_text(json.dumps({"pid": 2 ** 22 + 12345, "running": True, "annotators": {}}))
         assert read_status_file(project) is None
+
+
+class TestLinkLeaks:
+    """Links shouldn't leak through the launcher's own output or be sent unencrypted unnoticed."""
+
+    def test_request_log_hides_tokens(self, project_dir, caplog):
+        import logging
+        import requests
+        project = load_project(write(project_dir, MINIMAL))
+        links, signer = LinkStore(project), CookieSigner(project)
+        token = links.ensure_all()["alice"]
+        sup = Supervisor(project)
+        app = create_app(project, sup, Identifier(project, links, signer), links, signer)
+        server = make_server("127.0.0.1", 0, app, threaded=True)  # as `tater-launcher start` does
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with caplog.at_level(logging.INFO, logger="werkzeug"):
+                base = f"http://127.0.0.1:{server.port}"
+                assert requests.get(f"{base}/join/{token}", allow_redirects=False).status_code == 302
+                assert requests.get(f"{base}/join/{token}x?a=b", allow_redirects=False).status_code == 403
+        finally:
+            server.shutdown()
+            sup.shutdown()
+        log = "\n".join(r.getMessage() for r in caplog.records)
+        assert log.count("/join/[hidden]") == 2, log
+        assert token not in log
+
+    def test_filter_leaves_other_lines_alone(self):
+        import logging
+        from tater.launcher.app import HideLinkTokens
+        record = logging.LogRecord("werkzeug", logging.INFO, "", 0, '"%s" %s', ("GET /_launcher/ HTTP/1.1", 200), None)
+        assert HideLinkTokens().filter(record) and record.getMessage() == '"GET /_launcher/ HTTP/1.1" 200'
+        record = logging.LogRecord("tater.launcher", logging.ERROR, "", 0, "Exception on %s [%s]", ("/join/abc-_1", "GET"), None)
+        HideLinkTokens().filter(record)
+        assert record.getMessage() == "Exception on /join/[hidden] [GET]"
+
+    @pytest.mark.parametrize("base, warns", [
+        ("https://annotate.example.org", False),
+        ("http://127.0.0.1:8050", False),
+        ("http://localhost:8050", False),
+        ("http://[::1]:8050", False),
+        ("http://annotate.example.org", True),
+        ("http://10.0.0.5:8050", True),
+    ])
+    def test_plain_http_warning(self, base, warns):
+        from tater.launcher.cli import plain_http_warning
+        warning = plain_http_warning(base)
+        assert (warning is not None) == warns
+        if warns:
+            assert base in warning and "public_url" in warning

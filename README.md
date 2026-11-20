@@ -670,7 +670,7 @@ There are two ways to say who someone is:
 
 In either mode, a visitor who isn't on the list gets a "not part of this project" page, never anyone's work. Each annotator's process listens only on 127.0.0.1 and refuses requests that don't come from the launcher, so other users of a shared server can't connect to it directly.
 
-The launcher speaks plain HTTP. Encryption comes from what's in front of it.
+The launcher speaks plain HTTP. Encryption comes from what's in front of it. Over plain HTTP, anyone watching the network can read a link or the cookie it sets, so `tater-launcher start` warns when the links it prints use `http://` to another machine. Set `public_url` to the `https://` address in front. The launcher's own request log hides the secret part of each link.
 
 ### Where to run it
 
